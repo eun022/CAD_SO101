@@ -20,6 +20,8 @@
 - 각 파일 맨 위에서 프로젝트 루트를 sys.path에 넣고 `from teleop.force import ...`처럼 패키지로 import. 경로(config/data/models)는 모두 루트 기준 (`HERE = ROOT`)
 - 실행: `python teleop/run.py --force-src sim`, `python render/compare.py`, `python render/dataset.py`, `python teleop/plot.py teleop [csv]`, NA 서버 `C:\Users\ehfkw\anaconda3\envs\neural_actuator\python.exe na/server.py`
 - **아래 기록에 나오는 옛 파일 이름은 위 표로 바꿔 읽을 것**
+- **Git (2026-11-18)**: 원격 `origin` = https://github.com/eun022/CAD_SO101.git, 브랜치 `main`. `.gitignore`로 `data/`, `logs/`, `__pycache__/`, `external/`, `models/mujoco_menagerie/`, 자동 생성 장면(`models/_teleop_scene_*.xml`, `cube_pkg/_*.xml`), `*.mp4`, `.claude/settings.local.json` 제외. 외부 저장소 받는 법은 `README.md`
+  - 커밋/푸시는 사용자가 요청할 때만
 - 정리 전 원본 백업: 세션 스크래치패드 `py_backup` (임시)
 
 ## 환경
