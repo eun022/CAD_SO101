@@ -1,0 +1,511 @@
+# 프로젝트: NeuralActuator 기반 센서리스 햅틱 텔레오퍼레이션
+
+## 목표 (제안서 요약)
+- 슬레이브: SO-101 (F/T 센서 없음), 힘 추정: NeuralActuator (사전학습 체크포인트, 재학습 안 함)
+- 마스터: **Haply Minverse** (제안서에는 Inverse 3로 적혀 있으나 실제 장비는 Minverse)
+- 핵심: 저속(~60Hz) 힘 추정치를 햅틱 루프에서 렌더링하는 4가지 방법 비교
+  - ZOH, 선형 보간, 외삽, 로컬 접촉 모델 (공통 인터페이스: 저속 힘 스트림 + 고속 Haply 위치 -> 렌더링 힘)
+- 평가: **MuJoCo** SO-101 환경 (제안서의 Isaac Sim에서 2026-10-27 변경), 1kHz 정답 접촉력을 60Hz 다운샘플 + 노이즈(0.5~0.7N)·지연 주입 후 오프라인 비교
+  - 지표: RMSE(접촉 시작/해제 구간 별도), jerk, 오버슈트
+- 실물: 선정된 방법으로 SO-101-Minverse 데모 (정성적)
+
+## 폴더 구조 (2026-11-18 정리, 프로젝트 루트 `Desktop\CAD`에서 실행)
+| 폴더 | 파일 (옛 이름) |
+|---|---|
+| `teleop/` 원격 조작 | `run.py` (so101_teleop_follow), `force.py` (teleop_force), `ik.py` (so101_reach_map), `haply.py` (haply_force_test), `press_demo.py` (so101_press_demo), `plot.py` (plot_na_force) |
+| `render/` (3) 비교 | `dataset.py` (render_dataset), `methods.py` (force_renderers), `compare.py` (render_compare) |
+| `na/` NeuralActuator | `server.py` (na_server), `telemetry.py` (na_sim_telemetry), `replay.py` (na_sim_replay), `calib_static.py` (na_telemetry_calib), `calib_dynamic.py` (na_load_fit_dynamic) |
+| `calib/` 재보정 | `workspace.py` (haply_workspace_probe), `stylus_ori.py` (haply_orientation_probe), `stylus_axis.py` (haply_stylus_axis_probe), `stylus_tip.py` (haply_stylus_tip_probe), `mapping.py` (make_teleop_mapping), `gravity.py` (haply_gravity_set) |
+| 그대로 | `config/`, `data/`, `models/`, `cube_pkg/`, `external/` |
+- 각 파일 맨 위에서 프로젝트 루트를 sys.path에 넣고 `from teleop.force import ...`처럼 패키지로 import. 경로(config/data/models)는 모두 루트 기준 (`HERE = ROOT`)
+- 실행: `python teleop/run.py --force-src sim`, `python render/compare.py`, `python render/dataset.py`, `python teleop/plot.py teleop [csv]`, NA 서버 `C:\Users\ehfkw\anaconda3\envs\neural_actuator\python.exe na/server.py`
+- **아래 기록에 나오는 옛 파일 이름은 위 표로 바꿔 읽을 것**
+- 정리 전 원본 백업: 세션 스크래치패드 `py_backup` (임시)
+
+## 환경
+- Windows, VS Code, PowerShell
+- **Haply 테스트 + MuJoCo 시뮬레이션**: conda 환경 `cad2026` (Python 3.12), websockets 17.3, **mujoco 3.17.0** (2026-10-27 설치, numpy 2.5.4). 이전 환경 `haply`는 더 이상 사용하지 않음
+  - 실행: `conda activate cad2026` 후 `python <파일>`
+  - PowerShell에 conda가 PATH에 없으면 직접 실행: `C:\Users\ehfkw\anaconda3\envs\cad2026\python.exe <파일>`
+  - MuJoCo 기본 뷰어: `python -m mujoco.viewer` (모델 열기: `python -m mujoco.viewer --mjcf=<scene.xml>`)
+  - pip 설치 시 기존 경고: `jupyter-client`가 `python-dateutil`을 요구 (mujoco와 무관, 필요하면 나중에 설치)
+  - **numpy 메모**: mujoco 설치 때 pip가 numpy를 **2.5.4**로 설치/업그레이드함 (이전 버전은 기록 없음). numpy 1.x를 요구하는 패키지를 cad2026에 추가할 때 충돌 주의
+- **NeuralActuator 추론용**: conda 환경 `neural_actuator` (Python 3.10, 2026-11-17 생성). `cad2026`과 분리 (JAX/Flax 기반이라)
+  - 실행: `C:\Users\ehfkw\anaconda3\envs\neural_actuator\python.exe` (PowerShell에 conda가 PATH에 없음 -> `C:\Users\ehfkw\anaconda3\Scripts\conda.exe`)
+  - 설치: jax 0.6.2 (**CPU 전용** - 원본 requirements의 `jax[cuda12]`는 Linux 전용이라 제외), flax 0.10.7, optax, mujoco 3.17.0 + mujoco-mjx 3.17.0, numpy 2.2.6, pandas, pyyaml, scipy, tqdm, huggingface_hub
+    - 학습 전용 torch/tensorboard/opencv는 설치 안 함. `warp` 없음 경고는 무시해도 됨 (mjwarp 백엔드용)
+  - GPU 학습을 하려면 JAX CUDA가 Linux 전용이라 WSL2가 필요 (방침상 보류, 2026-11-17 사용자: 먼저 CPU 추론)
+  - 코드: `external\Dynamics-Modeling\NeuralActuator\` (GitHub Frank-ZY-Dou/Dynamics-Modeling sparse checkout, 커밋 541a93aa 2026-11-17, MIT)
+  - 체크포인트: `...\NeuralActuator\checkpoints\so101_weight.pkl`, `so101_weight_extended.pkl`, `so101_weight_residual.pkl` (Hugging Face frankzydou/NeuralActuator, 각 11.6MB, pickle이라 공식 출처만 사용)
+  - 입력(SO-101): 관절 6개 x {goal_pos, pos, load(부호 있음), vel, volts, temp, 위치오차}, 약 62Hz(0.016s), 9프레임 / 출력: force_pred(3), gate(접촉 확률), cond(모터 상태 6), tau(토크 대용)
+    - SO-101 힘 라벨은 페이로드 무게(z만) -> 수평 힘 추정은 약할 수 있음
+  - 오프라인 확인 (2026-11-17): `infer_actuator.py --robot so101 --checkpoint checkpoints/so101_weight_extended.pkl --config configs/so101_weight.yaml --csv data/so101/pick_and_place/500g/test/001.csv` -> 681스텝 14.7초(JIT 포함), 힘 MAE 0.239N, z 0.190N (정답 -4.90N, 예측 최대 -4.93N)
+    - 이 스크립트는 MJX 시뮬레이션 롤아웃까지 하는 오프라인용. 실시간은 `--force_only`(서보 신호만으로 힘 추정)
+  - `--force_only` (2026-11-17): 1스텝 약 1ms(CPU) -> 62Hz 충분. 들고 옮기기 빈손 MAE 0.023N, 500g 0.266N
+  - **시뮬레이션 텔레메트리 연동 (2026-11-17)**
+    - `na_telemetry_calib.py`: 관절 기준 = Menagerie와 동일 (같은 q에서 위치 차이 0.000mm). 전압/온도 평균 -> `config/na_telemetry.json`
+    - `na_load_fit_dynamic.py`: 실측 궤적을 MuJoCo에서 재생해 load ≈ k*평균토크 + c*속도 + b (상관 0.38~0.75. 정지 구간만으로 맞추면 부호가 거꾸로, 순간 토크는 ±2.94 한계에 붙음)
+    - `na_sim_telemetry.SimTelemetry`: MuJoCo 상태 -> 42차원 입력. `na_sim_replay.py`: 실측 CSV 재생 -> 시뮬레이션 텔레메트리 CSV
+    - 결과: 시뮬레이션 텔레메트리 추정은 접촉 없이도 약 -1.3N 치우침, 무게 구분 불안정 (빈손 MAE 1.28N / 300g 1.53 / 500g 1.53, 실측 텔레메트리 0.05 / 0.71 / 0.25)
+      -> 시뮬레이션에서 NeuralActuator는 **파이프라인 확인용**. 텔레오퍼레이션 가짜 입력 시험에서도 접촉(정답 10~30N 순간값)에 반응 없이 자세에 따라 1~2N만 변함
+    - `na_server.py` (neural_actuator 환경): UDP 127.0.0.1:47101, 요청 seq+42 float32 -> 응답 seq+force3+gate+tau6, 오프라인과 값 동일, 왕복 약 1ms
+  - 그래프: `python plot_na_force.py offline` -> `data/na_replay/na_force_offline.png`, `python plot_na_force.py teleop [csv]` -> `*_force.png`, `*_haply.png`
+- **텔레오퍼레이션 힘 피드백 (2026-11-17 구현, 실제 Minverse로는 아직 실행 안 함 - 실행 전 사용자 확인 필요)**
+  - `so101_teleop_follow.py --force-src none|sim|na [--force-scale 0.3] [--force-max 2]` (기본 none = 읽기 전용 그대로), 부품은 `teleop_force.py`
+  - sim: 그리퍼(고정 턱+움직이는 턱)가 받는 접촉력 합 (1kHz). 잡을 때 양쪽은 상쇄, 누르면 +z. 단단한 블록에 부딪히면 순간 10~30N (가짜 입력 시험)
+  - na: na_server.py 먼저 실행. 처음 2초 평균을 기준으로 뺌, 버튼 a = 기준 다시 잡기, 응답 0.5초 없으면 0
+  - 안전: 크기 상한 **3.5N** (코드 고정 F_HARD_MAX, 2026-11-18 사용자 결정으로 2N -> 3.5N. 아래 기록 속 "2N"은 당시 상한), 20Hz 저역통과, 손 속도 1 m/s 넘으면 0, 핸드셰이크, 종료/오류 시 0N 50회
+  - CSV 열 추가: fsim_*, fna_*, fna_raw_*, na_gate, fcmd_* (Minverse 좌표), contact_depth_mm, in_contact
+  - **1차 실제 실행 (2026-11-17, `--force-src sim`, raw 방식, `teleop_cube_20261117_133341.csv`)**: 사용자 "바닥을 꾹 누르면 튕김"
+    - 원인: 단단한 블록을 위치 제어 로봇이 밀어 20ms 안에 닿음/떨어짐 반복 (정답 0 <-> 40N, 최대 78N) -> 2N 상한에 잘린 0~2N이 빠르게 오감 (상한 근처 7.5%)
+    - 샘플 사이 빈 값 문제가 아님 (sim은 1kHz). 빈 값 보정(보간/외삽)은 na(62Hz) 쪽 과제 = 계획 (3)
+  - **로컬 접촉 모델 `--force-mode contact` (sim 기본값)**: `teleop_force.ContactRenderer`
+    - 접촉 시작 순간 목표 기준 표면 평면 고정 -> 깊이 = 손 목표가 평면 아래로 들어간 거리. 힘 = 300 N/m(Minverse 기준, `--k`) x 깊이/배율 x 법선 - 3 N·s/m(`--b`) x 손 속도(접촉 중)
+    - 끝: 손이 평면 위로 나오면, 또는 실제 접촉 없음 0.15초
+    - 같은 기록에 적용한 비교(`plot_contact_compare.py`): 매끄러움 지표(변화량/합) raw 0.041 -> 0.029. 1차 버전(현재 끝 위치 기준, 30ms 끊김에 종료)은 0.082로 오히려 나빴음
+    - raw 방식은 `--force-mode raw`로 남김
+    - 2차 실제 실행 (`teleop_cube_20261117_140403.csv`): 사용자 "물체 들 때 뚜둑뚜둑"
+      - 원인: 들고 있으면 턱 힘이 상쇄돼 합 0.1~0.4N인데 순간 튀는 값(상위 1% 12N)이 0.5N 판정을 넘어 접촉으로 오판 -> 손을 움직이면 깊이 최대 98mm, 2N이 짧게 켜졌다 꺼짐 (들고 있는 시간의 33%가 힘>0.1N, 20%가 2N)
+      - 수정: 접촉 판정을 10Hz로 거른 힘 크기로 (시작 1N이 20ms 유지, 끝 0.5N 미만 50ms) -> 같은 기록에서 힘>0.1N 4%, 2N 2%
+      - 누르기 기록 매끄러움 지표 0.038 (raw 0.041). 접촉이 중간에 끊기지 않음. 남은 물결은 기록 속 손이 이미 튕기던 움직임
+  - **갈 수 없는 곳 벽 (2026-11-18, 사용자 "MuJoCo가 못 들어가는 곳이면 Minverse도 막혀야")**: contact 모드에 추가
+    - 원인: (1) 접촉 깊이를 속도 제한·상자로 잘린 목표(goal)로 재서 손이 더 들어가도 깊이가 늘지 않음 (2) 작업 상자 밖·IK가 닿지 못하는 곳은 힘 없음 (3) 그리퍼 접촉만 봄
+    - 수정: 깊이 = 손 목표(상자로만 자름) 기준 / 벽 = (상자로 자른 점 - 자르기 전 손 목표) + (방향을 다 양보한 IK가 REACH_DB 5mm 넘게 못 닿은 만큼, 20Hz 필터) -> 같은 스프링 300 N/m + 벽 방향 감쇠 / 접촉 판정 대상을 팔 전체(base 제외)로 / 시작 2초 힘 서서히 증가
+    - 가짜 입력 헤드리스 확인: 빈 공간 0N, 상자 위 밖 -z 2N, 앞 밖 -x 2N, 블록 누르기 +z 2N
+    - 한계: 상한 2N이라 세게 밀면 뚫림 (300 N/m면 손 6.7mm에서 2N 도달)
+    - CSV 열 추가: hand_x/y/z (자르기 전 손 목표), wall_mm
+  - **스타일러스 신호 없음 (2026-11-18)**: `teleop_cube_20261118_144929.csv`는 37초 내내 스타일러스 자세/버튼이 한 번도 안 옴 (ball NaN, 버튼 0) -> 회전·그리퍼 안 움직임. 다음 실행 `_145307`은 정상 (자세 변화, 버튼 b로 닫힘 1.85mm)
+    - 직후 읽기 전용 확인: 스타일러스 device_id 1840, COM3, Radio, 배터리 78%, connected/awake/ready true
+    - 수정: 스타일러스 신호가 1초 넘게 없으면 안내 출력, 짧게 빠진 프레임(0.2초 미만)은 직전 버튼/자세 유지 (전에는 한 프레임만 빠져도 버튼이 풀려 그리퍼가 열림)
+  - **큐브 패드가 몸통에서 떨어짐 (2026-11-18, 사용자 "잡으면 큐브가 잘려버림", `teleop_cube_20261118_145651.csv`)**
+    - 원인: 패드(3g) 미끄럼 관절 한계(0~3mm)가 MuJoCo 기본 제약(무름 + 질량에 비례)이라 거의 안 버팀. 잡은 큐브를 블록에 부딪히면(약 10N) 안쪽 7.5mm, 이어서 바깥 11.8~22.5mm로 튕겨 패드가 턱에 끼고 몸통이 매달림
+    - 패드에 직접 힘 시험: 기본값 +10N -> 7.0mm, 바깥 2N -> 18mm / 수정 후 +10N -> 3.1mm, 바깥 10N -> 0.17mm
+    - 수정 (`so101_teleop_follow.py`, 모델 파일은 그대로): 불러온 뒤 패드 관절 한계 solref (0.002, 1), solimp (0.99, 0.999, 0.001) + 바깥(깊이 < 0)에 되돌림 스프링 2000 N/m, 감쇠 2. FEM 범위(0~3mm) 안 잡기 값은 그대로 (닫힘 1.69mm 동일). `PAD_FIX = False`로 끌 수 있음
+    - 3mm를 넘게 누르는 힘은 여전히 FEM 곡선 밖 (콘솔 경고 유지)
+  - **IK 갇힘 (2026-11-18, `teleop_cube_20261118_150826.csv`, 사용자 "세워져 있는데 방향이 이상")**: 스타일러스 볼을 위로 세우자(숙임 -81°) IK가 팔을 앞으로 엎은 자세(어깨 +97, 팔꿈치 -94, 손목 -92, 세 관절 모두 한계)로 넘어가 큐브를 쓸고, 이후 볼을 아래로 해도 14초 동안 그리퍼가 위를 향한 채 목표에서 최대 11cm 떨어져 갇힘 (기록 재생으로 재현)
+    - 수정: 숙임 목표를 -45° ~ 130°로 제한 (PITCH_MIN/MAX) + 위치 3cm 또는 각도 0.5rad 넘게 어긋나면 기본 자세(IK_SEED)에서 다시 풀어 더 나은 쪽 사용
+    - 같은 입력 재생 결과: 갇힘 없음, 볼을 다시 아래로 하면 1초 안에 정상 자세(숙임 42~75°)로 돌아오고 끝 높이가 손을 따라감 (높이 23cm에서는 손목 한계 때문에 숙임 약 45°가 최대)
+    - 이 실행은 `--force-src` 없이 돌려서 힘/벽은 꺼져 있었음 (기본 none)
+  - **빈 공간에서 힘이 걸림 (2026-11-18, `teleop_cube_20261118_151245.csv`, 사용자 "힘이 왜 걸려")**: 힘이 걸린 시간 32% 중 94%가 작업 상자 천장(로봇 z 0.24). 이 천장은 도달 지도 격자 ZS가 0.24에서 끝나서 생긴 값이고 실제 SO-101은 z 0.36까지 도달 가능
+    - 수정: 텔레오퍼레이션 상자 위쪽 상한 0.36 (`REACH_HI[2]`) -> 실제 상자 z 0.04~0.346 (Minverse 범위 끝까지)
+    - 같은 입력 재생: 힘이 걸린 시간 32% -> 1.7% (남은 것: 손이 바닥 z 0.04 아래로 내려간 경우 + 실제 접촉)
+  - **뗄 때 찐득함 (2026-11-18)**: 접촉 중 감쇠(-b*손 속도)가 모든 방향에 걸려, 손이 이미 표면 밖인데 접촉 판정이 남은 동안 손을 표면 쪽으로 당김
+    - 수정 (`ContactRenderer.UNILATERAL = True`): 법선 방향 힘 = max(0, 스프링 + 감쇠), 손이 표면 밖이면 0, 옆 방향 감쇠 없음. 벽도 같은 방식
+    - 기록 재적용 (`teleop_cube_20261118_151631.csv`): 손이 표면 밖인데 힘이 남은 시간 1186ms(최대 1.37N) -> 0
+  - **큐브 무게 렌더링은 안 되어 있음 (2026-11-18 확인)**: contact 모드는 누르는 힘만 (접촉 판정 1N, 15g 큐브 무게 0.15N은 못 넘음). NA는 시뮬레이션 텔레메트리 한계로 무게 구분 못 함
+  - **조종 기준점 = 고정 턱 끝 (2026-11-18 사용자 요청)**: 실행 중 `gripperframe` site 위치를 gripper 바디 좌표 (-0.0095, -0.0002, -0.1045)로 옮김 (`FIXED_JAW_TIP`, 고정 턱 메시 끝. 원래 위치 (0.012, -0.0002, -0.0981) = 두 턱 사이 앞쪽 빈 공간). IK·초록 마커·기록 tip_* 모두 이 점. 렌더링으로 마커가 턱 끝에 붙는 것 확인. 이 날짜 이후 기록의 tip_*는 이전 기록과 기준점이 다름
+    - 테스트용 가짜 입력 기록 `teleop_cube_20261118_144838`, `_145552`는 실제 실행 아님
+  - 그래프: 텔레오퍼레이션 창을 닫으면 `data/teleop_cube_<시각>_force.png`, `_haply.png` 자동 생성
+- **(보류) Isaac Lab / Isaac Sim용**: 2026-10-27 MuJoCo로 바꾸면서 보류. `C:\isaac\IsaacLab`은 참고용으로 남겨 둠. 아래 내용은 다시 쓸 때를 위한 기록
+  - 상태: 4단계 `uv sync --extra isaacsim` 도중 취소 -> `.venv`는 거의 비어 있음, uv 캐시 `C:\isaac\uv-cache`에 약 5.8GB 남음 (지우려면 `uv cache clean`)
+  - conda가 아니라 `uv` 사용 (Isaac Lab 3.0 공식 방식)
+  - 설치 위치: `C:\isaac\IsaacLab`, 가상환경: `C:\isaac\IsaacLab\.venv` (uv가 프로젝트 폴더 안에 생성)
+  - 실행: `C:\isaac\IsaacLab`에서 `uv run <명령>` (conda activate 하지 않음)
+  - **규칙: Isaac Lab의 uv 명령은 항상 `--extra isaacsim` 포함** (예: `uv sync --extra isaacsim`, `uv run --extra isaacsim ...`)
+    - 그냥 `uv sync`는 금지: extra 없이 동기화하면 `.venv`에서 Isaac Sim 패키지가 삭제됨
+  - uv 실행 파일: 공식 설치 스크립트(astral.sh)로 설치한 `C:\Users\ehfkw\.local\bin\uv.exe` (uv 0.13.6, 2026-10-27 설치)
+    - 사용자 PATH에 `C:\Users\ehfkw\.local\bin` 등록됨 -> 그냥 `uv` 로 실행 (conda activate 불필요)
+    - conda base에 있는 `anaconda3\Scripts\uv.exe` (0.10.0)는 Isaac Lab에 쓰지 않음. `where uv`로 `.local\bin` 쪽이 먼저 잡히는지 확인
+  - uv 캐시: `C:\isaac\uv-cache` (사용자 환경 변수 `UV_CACHE_DIR`로 영구 설정, 2026-10-27)
+    - 이전 기본 캐시 `C:\Users\ehfkw\AppData\Local\uv\cache` (0.95GB)도 남아 있음 (기존 uv 사용분)
+  - PATH와 `UV_CACHE_DIR`는 VS Code를 다시 시작해야 VS Code 터미널에 반영됨
+  - Windows 긴 경로 지원 켬 (`HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1`, 2026-10-27)
+- Minverse 펌웨어 7.10.1 (Haply 허브), Inverse Service WebSocket: `ws://localhost:10001`
+- 장치 사용 전 보정 필요 (LED 노란색 = 보정 필요, 스타일러스를 잉크병 거치대에 끼우고 2초 대기)
+
+## 시뮬레이션 실행 방침 (2026-10-27 사용자 결정, 같은 날 Isaac Sim -> MuJoCo로 변경)
+- 시뮬레이터는 **MuJoCo** (conda `cad2026`, Python API). Isaac Sim은 보류
+- 시뮬레이션은 **전부 이 PC(Windows 11, RTX 4070 12GB)에서** 진행. 다른 PC나 Ubuntu로 옮기는 안은 고려하지 않음
+- **기본은 GUI**: 사용자가 MuJoCo 뷰어(`mujoco.viewer`) 화면을 보면서 진행
+- **헤드리스(뷰어 없이 `mj_step`만)는 반복 데이터 추출용 옵션으로만** 사용 (같은 시나리오를 여러 번 돌려 1kHz 정답 접촉력을 뽑을 때 등)
+- SO-101 모델: MuJoCo Menagerie `robotstudio_so101` 우선 사용 (아래 (1) 참고)
+
+## 알려진 사항 / 주의
+- Isaac Lab Haply 예제는 JSON 키 `"inverse3"`를 읽음 -> Minverse도 `"inverse3"`로 확인됨 (2026-10-27)
+- Isaac Lab의 200Hz는 SDK 한계가 아니라 `HaplyDevice` 루프의 `asyncio.sleep(1/200)` 설정값. 서비스는 클라이언트 메시지 1개당 상태 1개를 보내므로 주기는 송신 속도에 따라 정해짐 -> 실측 결과 Python 1kHz 루프 가능 (아래 진행 상황 참고)
+- **힘 출력 조건 (2026-10-27, 추정 - 실제 출력은 미확인)**: 접속 후 첫 송신에 세션 프로필 + basis/preset 설정을 보내야 `status.in_use`가 True가 됨 (Hub 데모와 동일)
+  - 확인된 것: 핸드셰이크 후 서비스가 명령을 받아 장치 쪽 명령 힘으로 넘김 (in_use True, 별도 세션에서 current_cursor_force 관측)
+  - 미확인: 모터가 실제로 힘을 냈는지. 아래 이동 기록은 손 움직임과 구분되지 않음 (이전에도 손으로 든 것을 힘으로 오판한 적 있음) -> 사용자 육안/체감 확인 필요
+  - **확인됨 (위치 제어)**: `haply_square_test.py` (핸드셰이크 + set_cursor_position, 손 뗌) -> 장치가 혼자 2cm 네모를 그림 (꼭짓점 오차 ~4mm 이내, 사용자 육안 확인). 우리 세션에서 모터 구동 가능
+  - 미해결: 사용자 체감상 우리 `set_cursor_force` 힘이 Hub 데모보다 훨씬 약하거나 출력이 안 되는 느낌
+  - `haply_force_test.handshake(ws, first, profile_name)` 사용 (basis/preset은 현재 값 그대로 보내 좌표 불변)
+  - 없으면 `set_cursor_force`는 에러 없이 받아들여지고 모드도 position/force로 바뀌지만, 장치는 힘을 내지 않음
+  - 확인: 핸드셰이크 후 손 뗀 상태에서 +z 1.0N -> 0.46s에 +17.9mm 상승 (속도 제한으로 중단). 이전에는 2.4N에도 안 움직임
+    - 같은 시각 모니터(별도 세션)에서도 Hub 데모와 똑같이 session-updated(profile/basis/preset) 3건, in_use True, 장치 힘 최대 0.81N 관측
+    - +z 힘 = 위로 이동 확인
+  - 핸드셰이크 후 x+/y+ 0.5N (손가락으로 아래 받침): 3초에 1.6mm / 0.5mm -> 받치는 손가락 마찰이 수평 힘을 막음
+    -> `haply_official_move_test.py force x/y`에 z 높이 유지 제어 추가 (100 N/m, 3 N*s/m, 최대 1N), 손은 완전히 뗌
+  - Isaac Lab `HaplyDevice`도 핸드셰이크를 보내지 않으므로 Minverse에서 쓸 때 같은 문제가 생길 수 있음
+  - 이 전에 핸드셰이크 없이 한 힘/0N 테스트(sag, zero_force_compare, force_test, breakaway, release 1~2차) 결과는 실제 힘 출력이 없던 상태의 결과
+- WebSocket 메시지 형식 (Haply 공식 문서 vs Isaac Lab 소스, 2026-10-27 조사)
+  - 힘 명령: `{"inverse3":[{"device_id":ID,"commands":{"set_cursor_force":{"vector":{"x":..,"y":..,"z":..}}}}]}` (N 단위)
+  - 공식 문서는 `"vector"`, Isaac Lab은 `"values"`를 사용. 서비스는 모르는 키를 경고 없이 무시하므로 -> 공식 형식 `"vector"` 사용
+  - commands는 한 틱만 적용되고 사라짐 (`set_transform`만 유지됨). 같은 틱 안의 힘은 합산됨
+  - 힘 없이 상태만 읽을 때는 `"probe_position": {}`로 keepalive (힘 명령과 같이 보내지 말 것)
+  - 첫 송신에 `session.configure.profile` 지정은 선택 사항 (Isaac Lab은 보내지 않음). 공식 hello-floor 예제는 preset을 `arm_front_centered`로 바꾸는데, 이러면 좌표 원점이 바뀜 -> 현재 preset은 `defaults`
+  - 장치 설정 (공식 문서 Device Configuration / Filters)
+    - `force_gate.gain`(0~1): 진동이 감지될 때만 힘을 줄이는 보호 필터. 0이면 꺼짐, 1이면 최대로 줄임. 현재 0.3 -> 접촉 모델 렌더링에서 진동이 생기면 출력 힘이 명령보다 작아질 수 있음
+    - `damping.scalar`: 점성 저항을 추가. 단위·범위·`-1`의 의미는 문서에 없음 (현재 -1 = 꺼짐으로 추정, 미확인)
+    - `home_return`: "펌웨어에서 아직 동작하지 않음"으로 표기됨 -> 현재는 효과 없음
+    - `gravity_compensation`: HTTP GET `/inverse3/0144/config/gravity_compensation`으로 확인한 값은 `{"enabled": true, "scaling_factor": 0}`
+      - 릴리스 노트 3.5.6: `scaling_factor`는 배율이 아니라 장치 자체 무게 외에 추가로 보상할 페이로드 질량(kg). 0이면 꺼짐이 아니라 자체 무게만 보상(페이로드 없음)하는 기본값
+      - 즉 현재 중력 보상은 켜져 있음. 스타일러스 무게가 페이로드로 따로 잡히는지는 미확인 -> z축 테스트 때 0N에서 처지는지 먼저 확인
+    - 필터 순서: osc-damper -> force_gate -> damping -> force_scale(전체 배율 0~2, 마지막 단계)
+  - 문서에 나오지 않는 것: 힘 상한/클램프, 송신을 멈췄을 때 힘이 0이 되는지, 축 방향 -> 클라이언트에서 직접 클램프하고, 종료 시 0N을 명시적으로 송신
+- Minverse 최대 힘 약 4N -> 힘 제한 **3.5N** (2026-11-18 사용자 결정, 이전 2N), 추정 외력은 스케일링해서 매핑
+- **힘을 출력하는 코드는 실행 전에 반드시 사용자에게 확인** (사용자가 장치를 잡고 있는 상태에서 실행)
+
+## 진행 상황
+- 폴더 정리 2차 (2026-11-18, 사용자 선택): **휴지통으로 이동** - haply_axis_probe, haply_button_probe, haply_square_test, haply_official_move_test, haply_monitor, haply_stylus_dir_check, plot_press, plot_contact_compare (.py), 가짜/빈 텔레오퍼레이션 기록 4개(+그래프), models/_teleop_scene_soft·hard.xml(실행 시 다시 생김), __pycache__
+  - 남김: 텔레오퍼레이션·렌더링 비교·NA 서버와 의존 파일, 재보정용 측정 스크립트(workspace/stylus_axis/stylus_tip/orientation probe, make_teleop_mapping), haply_gravity_set, NA 보정 스크립트, 11-17/11-18 실제 조작 기록
+  - 아래 기록에 이 파일 이름이 남아 있어도 파일은 없음 (필요하면 휴지통에서 복구)
+- 폴더 정리 (2026-10-27): `haply_release_test.py`, `haply_sag_test.py`, `haply_zero_force_compare.py`, `haply_breakaway_test.py`, `haply_test.py`, `__pycache__/`, `logs/`를 **휴지통으로 이동**
+  - 아래 기록에는 이 파일 이름이 남아 있지만 파일은 없음 (필요하면 휴지통에서 복구)
+  - 남은 Haply 스크립트: `haply_force_test.py`(공통 함수: handshake 등), `haply_official_move_test.py`, `haply_square_test.py`, `haply_monitor.py`(flatten 함수를 내부로 옮김), `haply_axis_probe.py`, `haply_gravity_set.py`
+- [x] Minverse 허브 연결, 펌웨어 업데이트
+- [x] conda 환경 `cad2026` 생성 (이전: `haply`)
+- [x] `haply_test.py` 실행: JSON 구조(장치 키 이름) 확인 (2026-10-27)
+  - 장치 키는 Minverse도 `"inverse3"` (config.type = `"minverse"`, device_id `"0144"`, COM13) -> Isaac Lab 예제 키 그대로 사용 가능
+  - 위치: `inverse3[0].state.cursor_position{x,y,z}` (m), 속도 `cursor_velocity`, 스타일러스는 `wireless_verse_grip[0]` (버튼 a/b/c, orientation)
+  - handedness = left, basis permutation = XYZ, calibrated = true
+  - 서비스는 요청-응답 방식: 접속 시 전체 상태 1회 전송 후, 클라이언트가 메시지를 보내야 응답함 (안 보내면 수신 없음)
+  - 빈 `{}` 왕복은 ~20kHz지만 idle 상태의 캐시 응답이라 실제 장치 갱신 주기 아님
+- [x] 실제 장치 갱신 주기(Hz) 측정 (2026-10-27, `probe_position` keepalive, 힘 명령 없음)
+  - 스타일러스를 움직일 때: 왕복 ~14kHz, cursor_position 갱신 ~6kHz -> 1kHz 햅틱 루프 전제 충족
+  - 정지 상태일 때는 값 변화가 적어서 ~330Hz로 낮게 나옴 (실제 주기를 반영하지 못함)
+  - 응답 JSON에 타임스탬프/프레임 카운터 없음 (`session.config.started_time`은 첫 메시지에만 있는 세션 시작 시각) -> 샘플 주기는 수신 측 perf_counter로 값 변화 간격을 재서 추정
+  - 6kHz 값에 서비스 쪽 필터/보간이 섞였는지는 알 수 없음. 클라이언트가 1kHz보다 자주 새 값을 받는다는 결론은 그대로 유효
+  - idle vs 0N 힘 명령 비교 (`haply_zero_force_compare.py`, 2026-10-27)
+    - 0N `set_cursor_force` (`"vector"` 필드)로 모드가 idle -> setup -> (mode=position, control_mode=force)로 전환됨 -> `"vector"` 형식 동작 확인
+    - 위치 갱신: idle ~5.4kHz (간격 중앙값 147us, 95% 351us) / force ~7.2kHz (중앙값 127us, 95% 236us) -> force 모드가 느려지지 않음
+    - 질의 왕복 ~13kHz(~70us)가 측정 상한 -> 실제 샘플 주기는 "force 모드에서 최소 ~7kHz"까지만 확인 가능
+    - 최대 간격 3~5ms가 가끔 발생 (모드 전환 또는 Windows/Python 지연 추정) -> 1kHz 루프 지터와 함께 추가 확인 필요
+- [x] 상수 힘 출력 테스트 (0.5N, 한 축) - `haply_force_test.py z +` (2026-10-27)
+  - 1kHz 하이브리드 대기: 틱 간격 중앙값 1000us, 95% 1157us, 최대 3.6ms, 2ms 초과 4/1594 -> Python으로 1kHz 루프 가능
+  - 보고된 current_cursor_force가 명령값과 정확히 같음 (0.500N) -> 측정값이 아니라 명령값을 그대로 돌려주는 것으로 보임
+  - 확인됨 (x+/y+ 0.3N 테스트): 램프업 구간에서 보고값 = 한 틱 전 명령값 (차이 0.0000N) -> 실제 출력이 아니라 직전 명령의 에코. force_gate 등에 의한 감쇠도 이 값으로는 알 수 없음
+- [ ] 힘 부호 확인 (x, y 수평축, 0.3N, 2cm 자동 중단) - `haply_force_test.py` (2026-10-27 1차)
+  - x+, y+ 모두 유지 구간 위치 변화가 0.5mm 미만 (y+는 0.6초 동안 위치가 0.01mm 단위까지 그대로) -> 장치가 사실상 움직이지 않아 부호를 판별할 수 없음
+  - 첫 틱부터 (mode=position, control_mode=force)로 바로 전환됨
+  - 원인 후보: 손가락 저항, 장치 정지 마찰 > 0.3N, 힘이 실제로는 출력되지 않음 -> 사용자 체감 확인 및 손을 뗀 상태 테스트 필요
+  - 사용자 체감 (2026-10-27): 스타일러스가 무겁고, 손으로 옆으로 움직이기도 힘들며, 중력 보상이 안 되는 것 같음 (설정상으로는 enabled=true)
+    - 사용자는 왼손으로 사용 중 -> 설정 `handedness: "left"`와 일치하므로 handedness는 원인이 아님
+    - `haply_sag_test.py` 결과 (손을 뗀 뒤 z 변화)
+      - idle: 0.25s -30mm, 0.5s -68mm, 1s에 -106mm에서 멈춤 (바닥/기구 한계) -> idle에서는 모터 토크가 없어 그냥 떨어짐
+      - 0N 힘 모드: 0.5s -1mm, 1s -17mm, 2s에 -103mm에서 멈춤 -> idle보다 느리지만 결국 바닥까지 떨어짐 = 중력 보상이 부족함
+      - 떨어지는 방향이 -z -> **+z = 위** (축 방향 표의 첫 항목)
+      - 추정 원인: 중력 보상이 장치 팔 무게만 처리하고 무선 스타일러스 무게(페이로드)는 보상하지 않음 (`scaling_factor` = 0 kg)
+      - 이전 x/y 0.3N 테스트에서 움직이지 않은 것도, 처지는 스타일러스를 손가락으로 받치면서 생긴 저항 때문일 가능성이 큼
+    - 다음: `scaling_factor`(kg)를 HTTP POST로 단계적으로 올리며 0N 모드 처짐 재측정 (사용자 승인 2026-10-27)
+      - `haply_gravity_set.py <kg>`로 변경/확인, 0으로 복귀 가능. 2026-10-27에 0 -> **0.03 kg**로 변경함 (장치 전체 설정)
+      - 재측정: `python haply_sag_test.py --b-only`
+      - 0.03 kg: -6.7mm에서 정지한 것처럼 나왔으나, 사용자 말로는 측정을 잘못 한 것이고 실제로는 고정되지 않음 -> 무효
+      - 0.05 kg: 1s -47.6mm, 2s -63.4mm에서 정지 -> 여전히 부족
+      - 1회 측정은 놓는 방식/시작 자세에 따라 편차가 큼 -> `--repeat N`으로 반복 측정, 시작 위치(절대 좌표)도 출력하도록 수정
+      - 0.08 kg (3회 반복): 최종 dz -58 / -48 / -51mm, 1초 시점 -14 / -16 / -1mm -> 반복성은 좋음, 여전히 부족 (시작 위치 10mm 차이는 결과에 큰 영향 없음)
+      - 0.15 kg: 사용자 체감으로 위로 올라감 -> 과보상
+      - 0.08(처짐)과 0.15(뜸) 사이를 이분 탐색 -> 0.11 kg로 설정, 재측정 대기
+      - 목표: 어디서 놓아도 그 자리에 멈춤. 자세마다 맞는 값이 다르면 단일 값으로는 안 되므로 여러 위치에서 확인 필요
+      - 0.11 kg 결과: 자세마다 다름
+        - 높은 위치(z +146~166mm): 0N 모드에서 40~123mm 떨어짐 (보상 부족)
+        - 낮은/몸쪽 위치(z +105mm, y -120mm대): idle과 0N 모두 처음에 위로 +20~33mm, 옆(y)으로 +40~76mm 움직인 뒤 멈추거나 다시 떨어짐 (보상 과다)
+        - idle에서도 중력 보상이 동작함 (0kg일 때 idle은 바로 낙하, 0.11kg에서는 위로 움직임) -> 펌웨어 레벨 보상이고 모드와 무관하게 적용되는 것으로 보임
+        - 결론: 오차가 자세마다 달라서 scaling_factor 하나로는 맞출 수 없음. 장치는 남은 힘을 따라 특정 평형 위치로 흘러감
+      - (철회) 위 "자세마다 오차" 해석은 틀렸을 가능성이 큼: 사용자 관찰 결과, 놓으면 x/y/z 모두 한 지점(약 x 106~121, y -54~-74, z 104~133mm)으로 돌아가고, 아래로 눌러도 다시 올라감
+        -> 원점 복귀(`home_return`)가 원인으로 추정. 문서에는 "펌웨어에서 아직 동작 안 함"이라고 되어 있지만 펌웨어 7.10.1에서는 동작하는 것으로 보임
+      - 2026-10-27: `home_return`을 HTTP POST로 끔 (`{"enabled": false}`, 다시 켜려면 true). 이 상태에서 idle로 여러 위치에 놓아 보고 scaling_factor 재조정 예정
+      - `haply_release_test.py` (자체 PD, 최대 1.0N, 6방향 4cm 이동 후 0N으로 놓기) 1차: 6방향 모두 전혀 움직이지 않음 (위치 변화 0.1mm 미만, 속도 ~1e-13)
+        -> 스타일러스가 잉크병 거치대에 꽂혀 있었거나 손으로 잡고 있었을 가능성 확인 필요. 아니라면 1N 명령이 실제로 출력되지 않는 것
+        -> 사용자 확인: 거치대에서 뺀 상태인데도 한 좌표(약 x 110, y -61, z 111mm)에 단단히 고정됨. idle, home_return=false 상태에서도 마찬가지
+      - 점검 결과 (읽기 전용)
+        - 남아 있는 python 프로세스 없음. 실행 중인 건 `haply-device-manager.exe`(Haply Hub)뿐
+        - 서비스 세션 2개가 열려 있음: `co.haply.hub::pie-grip-stream`, `co.haply.hub::device-update` (Haply Hub 앱이 연 세션)
+        - 서비스 설정: force_scale 1.0, grip_hook(세워 들면 자동 잠금) 꺼짐, safe_trajectory 꺼짐 -> 힘이 막히는 설정은 아님
+        - 다음 후보: home_return 끄기가 장치 재시작 후에야 적용됨 / Haply Hub 앱 쪽 기능이 장치를 붙잡고 있음
+      - 사용자가 재보정을 시도했으나 계속 실패 -> 2026-10-27 설정을 처음 상태로 되돌림: `home_return` true, `scaling_factor` 0 (이후 상태 calibrated=false)
+      - 보정 절차 (공식 Minverse 퀵스타트): 스타일러스 전원 켬 -> 버튼이 오른쪽을 향하게 잉크병에 넣음 -> 딸깍 소리가 날 때까지 밀어 넣음 -> 2초 대기 -> 장치와 손잡이 LED가 바뀌면 성공
+        - Minverse LED 노란색 깜빡임 = 보정 안 됨 + 전원 어댑터 분리 / 노란색 서서히 밝아졌다 어두워짐 = 보정 필요
+        - 설치 시 Minverse 헤드가 책상과 평행해야 함
+      - 소리 끄기: 공식 문서, 서비스 설정(`/settings/?advanced=true`), Haply Hub 설정 파일 모두에서 소리 관련 항목을 찾지 못함
+      - 재연결 및 보정 성공 후 (`home_return` true, 페이로드 0kg) `haply_release_test.py` 2차 실행
+        - 이번에는 힘에 반응함: 아래로 이동 시 z +18mm에서 멈춤 (바닥/한계로 추정), 놓은 뒤 그 자리 유지
+        - 위로 1N(PD 상한)을 2초 걸어도 4cm에 도달하지 못함 -> 페이로드 0kg에서는 1N으로 팔+스타일러스를 들어올리기 버거움
+        - 위 방향 이동 후 0N으로 놓자 2초 동안 스스로 x -9, y -53, z +30mm 이동 -> 우리 명령이 아닌 힘(원점 복귀로 추정)이 작용
+        - 이어진 +x 이동 중 시작 위치에서 8cm를 넘어 자동 중단됨 (안전장치 정상 동작)
+        - 1차 실행에서 완전히 고정됐던 것은 그때 보정이 풀린 상태였던 것과 관련 있을 가능성 (이후 calibrated=false가 확인됨)
+        - **주의**: 2차 실행 직후에도 calibrated=false가 됨 (서비스, USB 연결은 유지). 두 번 다 `haply_release_test.py` 뒤에 보정이 풀림
+          -> 바닥/기구 한계 쪽으로 힘을 계속 거는 동작(아래 목표 미도달)이나 한계 근처의 빠른 이동이 보정 해제를 일으키는 것으로 추정
+          -> 원인을 알기 전까지 `haply_release_test.py` 사용 중지. 앞으로 힘 테스트는 작업공간 한계에서 멀리, 작은 이동만
+      - 2026-10-27 사용자가 중력 보상을 직접 조정함 -> 현재 `scaling_factor` **0.035 kg**, `home_return` true, 보정 완료
+        - 이 값은 사용자가 정한 것이므로 임의로 바꾸지 말 것
+      - y+ 0.3 / 0.6 / 1.0N 테스트에서 위치 변화 0.0~0.6mm -> CSV 확인 결과 모두 z +20~23mm(바닥 근처)에서 실행됨. 바닥 접촉 마찰 때문에 수평 힘으로 움직이지 않은 것
+        -> 시작 높이 검사(z < 60mm면 종료)를 넣었다가 제거함: 재보정 후 좌표 원점이 바뀌어 들어 올린 상태가 z -52mm로 나옴
+      - `haply_breakaway_test.py` (1cm 이동까지 힘 증가): y+ 1.0N (손가락으로 아래만 받침) -> x, y 0.1mm도 안 움직임 / z+ 1.0N (손 뗌, 바닥에서) -> 전혀 안 움직임
+        -> 손가락 마찰만으로는 설명 안 됨. 힘이 전달 안 되거나 1N으로 부족. Haply Hub가 Minverse 세션(minverse-viz, session-config)을 열어 둔 상태였음
+        -> 최대 힘을 인자로 받도록 수정 (기본 1.0N, 상한 2.5N, 초당 0.33N 증가)
+        - z+ 2.5N (손 뗌, 바닥에서): 스크립트는 "2.42N에서 1cm 이동"으로 판정했으나, **사용자가 손으로 들어 올린 것** -> 무효. 2.4N까지 힘으로는 떠오르지 않음
+          - 실행 중 Minverse가 삐삐 소리와 함께 초록/노랑 LED 번갈아 표시 (의미 미확인, 문서 LED 표에 없음). 직후 상태는 calibrated=true, idle로 정상
+          - 정리: 0.3N에서 사용자가 "약하게" 느낌, 1~2.4N에서도 장치가 움직이지 않음 -> 출력이 명령보다 크게 작은 것으로 의심 (`torque_scaling`, Hub 세션 간섭 등)
+          - 재보정 전 `haply_release_test.py` 2차 실행에서는 1N PD 힘으로 장치가 움직였음 -> 그 이후에 무언가 바뀌었을 가능성
+          - 사용자 판단: 2.4N 근처 경고는 주황 LED = 안전 트리거(불안정 감지)
+        - `haply_breakaway_test.py` 수정 (안전 트리거 필드 탐색용): 감쇠 -B*v (B=2 N*s/m), |v|>0.1 m/s 즉시 0N, F_TOP_MAX 2.0N,
+          매 틱 state/status 변화 전부 기록(`*_changes.csv`), 0N 대기 이후 status/mode 변화 시 중단, z+도 손가락으로 받친 상태에서 시작
+      - **사용자 확인: 지금까지 힘 명령으로 장치가 움직인 적은 한 번도 없음** (`haply_release_test.py` 2차의 움직임도 힘 때문이 아니었던 것으로 봄)
+        - 전역 설정 정상 확인: force_scale 1.0, safe_trajectory 꺼짐, grip_hook 꺼짐
+        - 공식 튜토리얼(01/04/05)과의 차이: 튜토리얼은 첫 송신에 `session.configure.profile` 핸드셰이크를 보냄, 우리 코드는 안 보냄
+          (문서상 목적은 "Hub가 세션을 인식"이고 필수라는 말은 없음). Minverse 작업공간 반지름은 0.04m (Inverse3는 0.10m)
+        - `haply_official_move_test.py`: 튜토리얼 순서 그대로(프로필 핸드셰이크 후) `pos`(set_cursor_position 1cm) / `force`(1.0N) 시험용
+        - **`pos x +` 성공 (2026-10-27)**: x +7.8mm 이동 후 원위치 명령에 +1.7mm까지 복귀. 모드 idle/setup -> position/force/cartesian(핸드셰이크 0N) -> position/position/cartesian
+        - 사용자 확인: Haply Hub 데모는 힘이 정상적으로 나옴 -> 장치/펌웨어는 정상, 문제는 우리 힘 명령 쪽
+        - **`force x +` 1.0N (핸드셰이크 있음) -> 움직임!** 0.25s에 +1.1mm, 속도 0.1 m/s 초과로 자동 중단. 모드 position/force/cartesian
+          -> **원인 확정: 세션 프로필 핸드셰이크(`session.configure.profile`)가 없으면 힘 명령이 출력되지 않음** (보고값 에코는 정상이라 알아채기 어려웠음)
+          -> 기존 힘 스크립트(`haply_force_test.py`, `haply_breakaway_test.py` 등)에도 핸드셰이크 추가 필요
+        - force 모드를 3cm 이동으로 수정: 0.5N(0.2s 램프) - 10*v (최고 속도 약 0.05 m/s), 3cm 도달 시 0N, 4cm/0.15 m/s 초과 시 중단
+          - 0.5N 결과: 3s 동안 x +7.4mm (y +5.0, z -1.8), 처음 0.5s는 거의 정지(정지 마찰), 이후 약 3mm/s, 최고 0.042 m/s -> 1.0N으로 올림
+        - 이후 1.0N + 감쇠 10에서는 전혀 안 움직임 -> 결과가 들쭉날쭉. 감쇠 항(속도 노이즈)이 force_gate를 건드렸을 가능성도 있음
+      - **Hub 데모 관찰 (`haply_monitor.py`, 읽기 전용, 2026-10-27)**
+        - 데모(demo-gel, demo-cube) 세션은 시작 시 `config.profile`, `config.basis`, `config.preset` 세 가지를 설정 (이벤트 `session-updated`)
+        - 그 직후 `status.in_use` False -> **True**, 모드 position/force/cartesian. 데모 종료 시 in_use False, idle
+        - 우리 힘 테스트에서는 in_use가 계속 False였음 (breakaway 테스트가 status 변화로 멈춘 적 없음) -> **in_use=True가 실제 힘 출력 조건으로 추정**
+        - `current_cursor_force`는 세션별 에코가 아니라 장치 전체 값: 힘을 안 보내는 모니터 세션에서도 데모 중 평균 1.15N, 최대 11.1N(순간값)이 보임
+        - 이벤트 `session-command-dropped` (tick_backpressure, 10초에 5~149회)도 관찰됨
+        - `haply_official_move_test.py` 핸드셰이크에 basis/preset(현재 값 그대로) 추가, in_use 기록
+      - 서비스 이벤트 채널 `ws://localhost:10020` (읽기 전용) 동작 확인: `{"name","category","level","data","message"}` 형식
+        (예: `system-rate-report` - 서비스 루프 주파수 중앙값 ~1170Hz, 평균 ~1524Hz). 테스트 중 이벤트를 `*_events.jsonl`에 기록, level이 info보다 높으면 중단
+        - **보정할 때마다 cursor_position 원점이 바뀔 수 있음** -> 절대 좌표로 높이/위치를 판단하지 말고 시작 위치 대비 상대 변화만 사용
+        - 참고: 0.6N 이상에서는 보고값이 명령과 0.006~0.01N 차이 남 (0.3N에서는 정확히 일치)
+  - 유지 구간 위치 변화 0.2mm 수준 -> 손으로 잡은 상태에서 0.5N으로는 축 방향을 판별할 수 없음
+- [x] 좌표축 방향 표 작성 (2026-10-27, `haply_axis_probe.py`, 힘 없이 손으로 이동, 왼손 사용, preset defaults / basis XYZ)
+
+  | 사용자 기준 방향 | 장치 축 | 측정 변화 (dx, dy, dz mm) |
+  |---|---|---|
+  | 오른쪽 | **+x** | +132.7, +12.4, -34.0 |
+  | 앞 (몸에서 멀어지는 쪽) | **+y** | +3.3, +79.1, -15.9 |
+  | 위 | **+z** | +10.7, +57.7, +103.2 |
+
+  - 오른손 좌표계 (오른쪽 x 앞 = 위). 손으로 움직여 다른 축 성분도 섞였지만 주축은 명확
+  - 힘 방향도 같은 좌표계: +z 힘 -> 위, +y 힘 -> 앞으로 이동 확인 (핸드셰이크 후). 공식 문서상 힘/위치 모두 application space
+  - 보정할 때마다 원점은 바뀔 수 있으므로 방향만 사용하고 절대 좌표는 쓰지 말 것
+- [x] 힘 출력 테스트 마무리 (2026-10-27): 사용자 판단으로 "괜찮음" -> 다음 단계로 진행. 가상 바닥 같은 체감 비교는 필요하면 나중에
+
+### 앞으로의 작업 순서 (2026-10-27 사용자 결정, 같은 날 MuJoCo 기준으로 변경. 이 순서대로 진행)
+- [x] **(1) MuJoCo + SO-101 장면** (2026-10-27 완료)
+  - [x] cad2026에 mujoco 3.17.0 설치, 기본 뷰어(`python -m mujoco.viewer`) 창 열림 확인 (2026-10-27)
+  - SO-101 공식 MJCF 확인 (2026-10-27)
+    - **MuJoCo Menagerie `robotstudio_so101`** (google-deepmind/mujoco_menagerie): `scene.xml`, `scene_box.xml`, `so101.xml`, `assets/`
+      - TheRobotStudio의 `so101_new_calib.xml`에서 파생, MuJoCo 3.1.3 이상, Apache 2.0
+      - 수정 사항: implicitfast 적분기, 그리퍼와 팔에 **기본 도형 충돌체 추가**(접촉 계산에 유리), 액추에이터 forcerange 기본값, 카메라 마운트 추가
+      - `scene_box.xml`은 상자가 놓인 장면 -> (2) 접촉 시나리오 출발점으로 쓸 수 있음
+    - **TheRobotStudio/SO-ARM100** `Simulation/SO101/`: `scene.xml`, `so101_new_calib.xml`(기본, 관절 범위 중앙이 0), `so101_old_calib.xml`(팔을 수평으로 편 자세가 0), `so101_new_calib_camera.xml`, `joints_properties.xml`, URDF도 있음
+      - onshape-to-robot으로 생성, STS3215 모터 특성은 Open Duck Mini에서 가져옴, 베이스 충돌 메시는 제거됨
+      - LeRobot 그리퍼(선형 0~100) 매핑은 아직 반영 안 됨
+    - 실물 SO-101의 캘리브레이션(new/old)과 맞는 쪽을 골라야 함 -> 실물 데모 (5) 전에 확인
+  - [x] Menagerie `robotstudio_so101` 받기 (2026-10-27, sparse checkout)
+    - 위치: `Desktop\CAD\models\mujoco_menagerie\robotstudio_so101\` (git sparse checkout, SO-101 폴더만. 루트의 README/LICENSE 등은 cone 모드라 함께 받아짐), 26.6MB
+    - Menagerie 커밋 `f3b6013629c7b94f8ee93fd977b161fa8350f9bc` (2026-10-23)
+    - **라이선스: Apache License 2.0** (`robotstudio_so101/LICENSE`). 원본은 TheRobotStudio `so101_new_calib.xml` (커밋 aec17bbc)에서 파생. 재배포/수정 시 LICENSE와 변경 고지 유지
+    - **원본 파일은 수정하지 않음**. 다시 받으려면 `git -C models\mujoco_menagerie pull`
+  - [x] 우리 장면 파일 `models\so101_scene_1khz.xml`: 원본 `scene.xml`을 include하고 `timestep=0.001`(1kHz)로 덮어씀
+    - **원본 timestep = 0.005 (200Hz)**, 적분기 implicitfast, cone elliptic, iterations 10, ls_iterations 20, impratio 10
+    - 주의 (MuJoCo 3.17.0): 다른 폴더에서 include하면 원본의 `meshdir="assets"`가 어긋나 메시를 못 찾음
+      -> include **뒤에** `<compiler meshdir="mujoco_menagerie/robotstudio_so101/assets"/>`로 다시 지정 (앞에 두면 원본 값이 덮어써서 실패)
+    - 관절 6개: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper / 위치 액추에이터 6개 (STS3215, kp 998.22, kv 2.731, forcerange ±2.94)
+    - 실행: `python -m mujoco.viewer --mjcf=C:\Users\ehfkw\Desktop\CAD\models\so101_scene_1khz.xml`
+    - `scene_box.xml`(상자 + pickup 키프레임)은 (2) 접촉 시나리오 때 같은 방식으로 include해서 사용 예정
+  - [x] 사용자가 뷰어에서 마우스로 관절을 움직여 확인 -> "잘 됨" (2026-10-27). **(1) 완료**
+- [ ] **(2) 접촉 시나리오 + 1kHz 정답 접촉력** (2026-10-27 순서 조정: 2a -> 2b -> 2c)
+  - [ ] **(2a) 위->아래 누르기 시나리오 하나**: SO-101 그리퍼 끝이 위에서 내려와 고정 블록을 누르고 다시 올라감. 뷰어로 보여 주기 (간단하게)
+    - 2026-10-27 작성: 장면 `models/so101_press_scene.xml` (1kHz 장면 include + 고정 블록, 윗면 z=0.05), 스크립트 `so101_press_demo.py` (뷰어에서 반복 재생, 1회차 CSV `data/press_*.csv`)
+    - 궤적: 끝 목표 z 0.10 -> 0.04(윗면 1cm 아래) 2초 -> 유지 1초 -> 0.10 2초 -> 대기 1초 (주기 7초), 끝 xy = (0.25, 0)
+    - IK: 위치 3개 + 손목 각도 합(lift+elbow+wrist_flex = 1.45rad, 그리퍼가 아래를 향함, 수직에서 약 13° 기울어짐), 100Hz 갱신, 위치 액추에이터로 추종
+    - 접촉력: `mj_contactForce` 합, 법선은 geom1->geom2이고 값은 geom2가 받는 힘 -> 블록이 받는 힘으로 부호 맞춤
+    - 헤드리스 1회 확인: 접촉 t=2.37~4.65s, 블록이 받는 힘 Fz 최대 약 -32N, Fx 약 +20N (최대 |F| 37N)
+      - 실제로 닿는 부위는 끝점이 아니라 **고정 턱 충돌 메시(geom31)의 아랫모서리** (13° 기울기 때문에 끝점보다 2.3cm 뒤, 끝점은 윗면 9mm 위에서 멈춤)
+      - (2c)에서 끝점 접촉이 필요하면 그리퍼를 더 수직으로 세우거나 접촉 부위를 따로 정할 것
+    - 뷰어 실행: `python so101_press_demo.py` (창 제목 "MuJoCo : so101_press_scene")
+    - **누르기 깊이 조정 (2026-10-27)**: 처음 값(목표 z 0.040)은 유지 구간 내내 약 35N (스파이크 아님, 관절 토크 한계 2.94N·m에 붙음)
+      - 위치 액추에이터 강성이 커서 끝 기준 약 0.1mm당 2.8N. 헤드리스 탐색으로 `PRESS_Z = 0.05913` -> 유지 구간 |F| 약 3.5~5N (평균 4.0N), 접촉 순간 짧은 스파이크 약 9N
+      - 그래프: `python plot_press.py [csv]` -> 같은 이름 .png (cad2026에 matplotlib 3.11.2 설치, 이때 python-dateutil도 함께 설치됨)
+  - [-] **(2b) Minverse 헬로월드 (공 + 벽)**: 2026-10-27 사용자 결정으로 **건너뜀**. 대신 아래 (4)의 작업공간 매핑을 먼저 진행
+    - 나중에 힘 피드백을 붙일 때 조건: 힘 상한 **2N**, 기존 안전장치 그대로 (속도 제한, 종료/Ctrl+C/예외 시 0N, 핸드셰이크 사용), 실행 전 사용자 확인
+  - [ ] **(2c) 본격 접촉 데이터**: 접촉 대상/부위/강성 종류 정해서 시나리오 구성
+    - 2026-11-17 받은 FEM 큐브 패키지 -> `cube_pkg\` (루트에 풀린 것을 옮김. 파일끼리 `__file__` 기준 경로라 폴더째 옮겨도 동작, `demo_grip.py medium --no-viewer` 확인: 닫힘 1.77mm에 0.57N)
+      - 큐브 soft/medium/hard, 윗면 + 양옆(-x, +x) 패드, FEM 곡선 힘. 사용법은 `cube_pkg\README.md`. 장면에 `cone="elliptic" impratio="10"` 필요, timestep 1ms 기준
+      - 마찰 없는 쪽 모델 (비스듬히 누를 때 30도에서 수직 힘 0.65배, 완전 고착이면 0.87배)
+      - 방침: 뉴럴 액추에이터보다 큐브를 먼저 연결 (시뮬 비교 (3)은 정답 접촉력 + 노이즈 주입이라 뉴럴 액추에이터 불필요)
+      - 텔레오퍼레이션 연결 (2026-11-17): `make_cubes.py --pos 0.25 0 0.05 --out models/cubes_teleop` (블록 윗면 위, 15g) -> `so101_teleop_scene.xml`이 `cubes_teleop/cube_medium.xml` include (예전 30g 단단한 상자는 제거)
+        - SO-101이 정면으로 내려 잡을 때 고정 턱 = -x, 움직이는 턱 = +x (시뮬 확인) -> 큐브 기본 방향 그대로 사용
+        - 그리퍼를 활짝 연 상태(1.0)로 내려가면 큐브가 턱 사이로 들어가 닿지 않음 (정상). 위에서 누르기는 그리퍼를 닫고 해야 윗면 패드에 닿음
+        - b 잡기: 끝까지 닫지 않고 닫힘 목표(`--close`, 기본 2mm)에서 유지 (끝까지 닫으면 패드가 3mm 한계에 붙어 FEM 곡선 밖의 힘)
+        - 헤드리스 확인 (medium): 잡기 닫힘 2.00mm 한쪽 0.67N(README 0.66N), 들어 올려 +55mm 유지 중 미끄러짐 없음 / 닫은 그리퍼로 위에서 누르기 1.67mm 1.53N
+        - `so101_teleop_follow.py --level soft|medium|hard --close mm --no-log`, 1kHz 기록 `data/teleop_cube_*.csv` (힘 단위 N, 깊이 mm), 1스텝 약 130us
+        - 1차 실행 (2026-11-17, `teleop_cube_20261117_121512.csv`): 시작 0.1초 만에 끝이 8cm 떨어져 큐브를 쳐서 블록 밖으로 날림
+          -> 원인: 첫 프레임에 스타일러스 각도가 손목 각도 목표로 한 번에 들어감 (시뮬 재현: 1.45->0 rad 점프 시 끝 최대 126mm 출렁)
+          -> 손목 각도 목표 1.5 rad/s, 비틀기 3 rad/s 속도 제한 추가 (점프 시 12mm)
+          - 같은 실행에서 b를 한 번도 안 눌렀음 (열린 그리퍼로 누름). 목표점이 큐브 5cm 아래로 가면 모터가 최대로 밀어 패드가 3mm 한계 초과 -> 경고 출력 추가 (힘 피드백이 붙으면 자연히 줄어들 문제)
+        - 큐브 무게 15g은 가벼움 (README도 임시값). 실리콘이 꽉 찬 3cm 큐브면 약 29g -> 30g 제안, 사용자 결정 대기
+        - 2차 실행 (`teleop_cube_20261117_121830.csv`): 잡고 22cm까지 들기 성공 (2.00mm, 한쪽 0.66N). 사용자: "그리퍼 방향이 스타일러스와 완전히 같지 않음"
+    - **스타일러스 = 그리퍼 (2026-11-17 사용자 요청)**: 그리퍼 끝 위치 = 스타일러스 **볼 끝** 위치, 스타일러스 방향 = 그리퍼 방향
+      - 원인 분석: SO-101은 끝 위치마다 낼 수 있는 숙임 각도 범위가 좁음 (0°=수평 앞, 90°=아래, y=0)
+        z 6cm: x18 55~100°, x26 15~95°, x34 -5~80° / z 14cm: x18 40~60°, x26 -10~70° / z 22cm: x18 15~35°, x26 -30~50°
+        -> 높이 14cm 이상에서는 똑바로 아래를 못 봄. 기존 IK(위치 우선) 각도 오차 중앙 18°, 위치+각도 동시 IK도 17° (로봇 한계)
+      - **사용자 결정: 방향 우선, 단 로봇이 낼 수 없는 값은 내보내지 않음**
+        - `PosIK.solve_pose()` (so101_reach_map.py): 위치 3 + 각도 합 1을 관절 4개로 동시에 (가중 최소제곱, 한 번에 0.15rad 제한, margin)
+        - 텔레오퍼레이션: 각도 가중치 2.0 -> 0.2 -> 0.02 순으로 시도, 끝 위치가 3cm(POS_TOL) 안이면 채택 (방향만 고집하면 위치가 20~28cm 벗어남)
+        - 관절 명령: 한계에서 0.05rad 안쪽, 1kHz로 관절당 3 rad/s 이하 (시뮬 실제 관절 속도는 서보 응답 때문에 최대 약 4.9 rad/s)
+        - 그리퍼 끝은 손목 비틀기 축에서 12mm 떨어져 있음 -> IK에 현재 비틀기 명령 반영 (안 하면 최대 24mm 어긋남)
+        - IK 1회 약 1ms, 최악(3단계) 약 3ms / 10ms 주기
+        - 가짜 Minverse 입력 헤드리스 확인: 아래(블록 근처) 90.0°/1.6mm, 높이+아래(불가) 53°/1.4mm, 앞 30° 30.7°/0.2mm, 몸쪽 120° 96°/1.0mm
+      - 볼 끝 위치: `haply_stylus_tip_probe.py` (피벗 보정, 읽기 전용, 볼 끝 고정하고 15초 기울이기) -> `config/stylus_tip.json`
+        - 텔레오퍼레이션은 stylus_tip.json이 있으면 볼 끝 기준, 매핑 중심은 haply_center에서 길이만큼 아래로 옮김 (볼이 아래를 향한 자세 기준). 측정 전
+      - CSV에 방향 열 추가: pitch_des/cmd/act, ball_x/y/z, out_of_plane_deg (팔 평면 밖 각도, 반영 불가), grip_ax_*, w_pitch
+    - `timestep = 0.001`(1kHz)로 정답 접촉력 로깅 (MuJoCo 접촉력: `mj_contactForce` 또는 force/touch 센서)
+    - 반복 추출은 헤드리스 옵션 사용 가능
+- [ ] **(3) 렌더링 4종 오프라인 비교** (2026-11-18 1차 결과)
+  - 데이터 `render_dataset.py`: 헤드리스, 그리퍼 닫고 블록 위 큐브 윗면을 누름. 큐브 soft/medium/hard x 시나리오 5종(press_slow 1cm/s, press_fast 5cm/s, sine_1hz, sine_3hz 깊이 1~3mm, tap 10cm/s x3) -> `data/render/<level>_<scenario>.npz` (t, hand, tip, F 정답 1kHz, 윗면 패드)
+    - 최대 힘 soft 약 1.3N, medium 2.2N, hard 3.2N (패드 한계 3mm 안쪽). IK는 위치 우선(w_pitch 0.02) - 0.2면 각도 때문에 끝이 15mm 어긋나 다른 부위가 닿음
+  - 방법 `force_renderers.py` (공통 인터페이스 `update(t, x, sample)`, sample = (측정 시각, 측정 힘) 또는 None)
+    - ZOH / 선형 보간(한 주기 늦음) / 외삽(최근 4개 샘플 직선 맞춤 후 연장. 두 점 기울기 버전은 노이즈로 RMSE 3.6N이라 바꿈) / 로컬 접촉 모델
+    - 로컬 접촉 모델: 측정 시각의 손 위치와 힘을 짝지어 힌지 F = k*max(0, s0 - x·n) 맞춤 (s0 격자 + k 닫힌 해, 이전 값 쪽 정규화), 매 틱 현재 손 위치로 계산
+      - 접촉 판정/법선 = 최근 6개 평균 힘 > 0.9N, 위치는 접촉 근처 기준점 대비 (원점 기준 투영은 법선 흔들림에 수십 mm 튐)
+      - 표면 기억: 근거 충분한 표면(안쪽 샘플 6개 이상, k 0.1~5 N/mm)은 기억해 다음 접촉 시작부터 지연 없이 렌더링. 옆으로 2cm 밖이면 안 씀, 손이 표면 안 1mm인데 힘이 예상의 30% 미만이 2번이면 버림, 관측 최대 힘 1.5배+0.3N로 제한
+  - 비교 `render_compare.py`: 60Hz(위상 무작위) + 노이즈 축마다 sigma {0, 0.5, 0.7} + 지연 {0, 16, 33, 50}ms, 시드 5 -> `data/render/results.csv`, `compare_sigma0.5.png`, `compare_sigma0.7.png`, `example_medium_tap.png`
+    - 지표: 전체/접촉 중/시작(-50~+200ms)/해제 RMSE, jerk = |dF/dt| RMS (N/s, 정의는 사용자 확인 필요), 오버슈트, 자유 공간 헛힘
+  - 1차 결과 (노이즈 0.5N, 지연 33ms, 평균): 접촉 중 RMSE ZOH 0.94 / 보간 0.83 / 외삽 1.62 / 접촉 모델 0.47 N, 해제 RMSE 0.94 / 0.85 / 1.65 / 0.13, jerk 290 / 72 / 455 / 31 N/s, 헛힘 0.83 / 0.69 / 1.56 / 0.00
+    - 접촉 모델 약점: 처음 닿는 접촉은 약 100ms 늦고 계단처럼 켜짐 (시작 RMSE 0.68로 보간 0.83과 비슷). 두 번째부터는 표면 기억으로 지연 없음
+    - 주의: 접촉 모델 파라미터를 이 데이터로 조정함 (과적합 가능) -> 사람 조작 기록 등 다른 데이터로 검증 필요. 시나리오가 한 표면 수직 누르기뿐 (미끄러짐, 잡기, 움직이는 물체 없음). 기준 방법들은 필터 없는 원형
+  - 공통 인터페이스 정의 (저속 힘 스트림 + 고속 위치 -> 렌더링 힘)
+  - ZOH, 선형 보간, 외삽, 로컬 접촉 모델 구현
+  - 1kHz 정답을 60Hz 다운샘플 + 노이즈(0.5~0.7N) + 지연 주입 후 비교: RMSE(접촉 시작/해제 구간 별도), jerk, 오버슈트
+- [ ] **(추가, 2026-11-18 사용자 요청) 강성 인지 파지 (stiffness-aware grasping)** - 원래 제안서 범위 밖 확장, AI 없이 최소제곱
+  1) 강성 추정 모듈: 60Hz 노이즈 힘 + 1kHz 위치 -> 접촉 감지(임계값 + 히스테리시스) -> 깊이 vs 힘 직선 맞춤 = k, 꺾이는 점 = 접촉/변형 시작. 큐브 3종 정답 대비 오차 %를 노이즈 0.3/0.5/0.7N별 표로
+     - 주의: 잡을 때는 그리퍼 전체 접촉력이 양쪽 턱 상쇄로 거의 0 -> 잡기 강성은 움직이는 턱 하나의 힘 + 턱 닫힘 거리로 추정
+     - 정답 강성 = 큐브 FEM 곡선 0~2mm 구간 직선 맞춤 기울기 (곡선이 깊을수록 단단해지는 비선형이라 구간을 정해야 함)
+     - **1) 구현·평가 (2026-11-18)**: `grasp/stiffness.py` (StiffnessEstimator + hinge_fit, 힌지 f = k*max(0, p-p0) 격자+닫힌 해, 접촉 판정 = 최근 6개 평균 > 3시그마/sqrt6, 끝 = 절반 아래 0.1초, 시작 0.3초 전부터 포함)
+       - 잡기 데이터 `grasp/grip_dataset.py` -> `data/grasp/grip_<level>_<slow|fast>.npz`: 고정 턱 끝을 큐브 -x 옆 3mm 밖·높이 60mm에 위에서 내려 놓고 그리퍼 0.1/0.4 rad/s로 패드 닫힘 2.6mm까지. p = 움직이는 턱 접촉점 닫힘 거리(관절각 -> 운동학, 접촉점은 정답 접촉 위치 평균 = 1회 기하 보정), f = 그 턱 힘
+         - 처음엔 두 턱 사이 점으로 놓아 고정 턱이 패드와 몸통 사이에 박힌 채 시작 (턱 힘이 FEM의 3배) -> 위에서 내려오게 수정
+       - 평가 `grasp/eval_stiffness.py` (`table`로 표만): 누르기 15 + 잡기 6 데이터 x 노이즈 0.3/0.5/0.7 x 시드 20, 60Hz + 33ms 지연(측정 시각은 앎) -> `data/grasp/stiffness_results.csv`, `stiffness_fit_press.png`, `stiffness_fit_grip.png`
+       - **실효 vs 재료**: 노이즈 없어도 끝 위치로 잰 강성은 재료(FEM 0~2mm)보다 무름. 끝 이동이 패드 눌림의 1.3~1.6배 = 직렬 컴플라이언스 2000~4000 N/m (큐브-블록, 턱-패드 MuJoCo 무른 접촉). 누르기 실효/재료 soft 98%, medium 88%, hard 75%. 잡기는 60~70%
+         -> 추정기 정확도는 '실효 강성'(노이즈 없는 1kHz 같은 맞춤) 대비로 봄. 잡기 제어에 필요한 것도 실효 강성 (실물도 로봇/그리퍼 휨이 직렬로 더해짐)
+       - 결과 (실효 대비 |오차| 중앙값, 노이즈 0.3/0.5/0.7N): 누르기 soft 11/19/32%, medium 7/11/16%, hard 5/8/11% (치우침 ±3% 이내) / 잡기 soft 24/35/64% (감지율 100/84/79%), medium 11/16/27%, hard 8/11/15%
+         - 접촉 후 0.25초 시점 추정은 |오차| 약 20~30% (잡기 soft는 80~125%), 꺾임점(접촉 위치) 오차 0.1~0.5mm (잡기 soft 0.8~1.7mm)
+         - 헛감지: 실행당 누르기 0.12회, 잡기 0.4~0.5회 (노이즈 대비 임계값이라 노이즈 크기와 무관, 원인 미조사)
+         - 잡기 soft는 힘이 0.3~0.5N뿐이라 노이즈 0.5N 이상에선 추정 불가 수준
+  - **2) 구현·평가 (2026-11-18, 헤드리스만. 텔레오퍼레이션 버튼 b 연결은 아직)**: `grasp/grip_control.py` (JawGeometry: 관절각 <-> 턱 닫힘 거리, 보정값 `config/grip_jaw.json`은 grip_dataset이 저장 / GripController), 비교 `grasp/eval_grip.py` -> `data/grasp/grip_compare.csv`
+    - 동작: 0.1 rad/s로 닫으며 닫기 시작 이후 전체 샘플에 힌지 맞춤 -> 확신(k/k_std > 3, 접촉 뒤 0.8mm·샘플 8개 이상, 최근 12개 평균 힘 > max(3시그마/sqrt12, F_MIN)) -> 목표 힘 F = clip(k x 1.5mm, 0.25, 1.2N), 목표 깊이 = min(F/(k+k_std), 2.5mm) -> 지나쳤으면 그 자리 유지(되돌아가지 않음)
+      유지 중: 0.5초 평균이 목표 80% 미만이면 0.1초마다 0.05mm 더 조임, 40% 미만이면 판단 취소하고 다시 닫기
+    - 시행착오: (a) 닿기 전 노이즈로 허공에서 멈춤 -> 힘 증거 조건 강화 (b) 접촉점이 1mm 일찍 잡혀 되돌아가며 놓침 -> 되돌아가지 않기 (c) 고정 턱과 큐브 사이 3mm 틈이면 큐브를 밀기만 하는 마찰 힘(약 0.1N)을 '쥠'으로 착각 -> F_MIN 조건 + 평가 배치를 1.5mm 틈으로 (d) 특정 노이즈 패턴에서 너무 이른 판단 -> 유지 중 판단 취소
+    - 결과 (1.5mm 틈, 시드 5, 들기 10cm): 강성 기반 44/45 들기 성공 (medium 0.3N 1회 실패), 미끄러짐 0.1mm 이하. 유지 힘이 목표를 잘 따라감 (soft 0.30/0.28N 등)
+      - 가장 깊은 패드: 끝까지 닫기 3.2mm(패드 한계, 힘 1.5/3.0/5.2N) / 2mm(정답 사용) 1.6~1.8mm / 강성 기반 hard 0.9~1.4mm, medium 1.6~1.9mm, soft 2.0/2.7/3.0mm(노이즈 0.3/0.5/0.7)
+      - 한계: soft + 큰 노이즈는 판단이 늦어 한계(3mm)까지 찌그러짐. 추정 k가 노이즈 크면 커지는 경향(medium 220/407/677) -> 목표 힘 순서가 노이즈에 따라 뒤바뀔 수 있음
+  - **3) 연동 (2026-11-18, 가짜 입력 헤드리스로만 확인, 실제 Minverse 미실행)**: `teleop/run.py` 버튼 b = 강성 인지 파지가 기본 (`--grip-mode stiff`, 예전 2mm 방식은 `--grip-mode fixed`), `--grip-noise 0.5`(N, 턱 힘에 60Hz + 33ms 지연과 함께 주입)
+    - b 누르는 순간 GripController.start, 놓으면 release(엶). q > 0.40(턱 46mm 이상)에서는 0.8 rad/s로 빠르게, 그 뒤 0.1 rad/s
+    - 화면 왼쪽 위(영문, MuJoCo 글꼴에 한글 없음): 상태 / 추정 강성 ± / 목표 힘 / 측정 힘(노이즈 평균) / 정답 힘 / 패드 닫힘. 판단 전에는 "estimating..."
+    - 콘솔: 판단 시 "추정 강성, 목표 힘, 정답 힘", 판단 취소 시 안내. CSV 열: grip_state, k_est, k_std, f_target, f_meas
+    - 강성 공유: `teleop.force.ContactRenderer.set_object_stiffness(k)` (판단 시 호출, 지금은 저장만 - Minverse 스프링 변환 규칙 미정), `render.methods.ContactModel.set_stiffness_prior(k)` (N/m -> 맞춤 사전값)
+    - 가짜 입력 확인: medium 0.3/0.5N 한 번에 판단 (k 347/250, 목표 0.52/0.37N, 정답 유지 0.50/0.44N), hard 0.7N (494, 0.74, 0.70N), 모두 10cm 들기 성공 후 b 놓으면 떨어짐. soft 0.5N은 판단 취소 2번 뒤 패드 3.4mm까지 눌림 (알려진 한계)
+    - `JawGeometry.jaw_force(m, d, bodies)`: 움직이는 턱이 받는 미는 힘 (닫힘 방향 = 턱 접촉점 운동 방향, `axis_g`)
+  - **들고 있는 물체 무게 렌더링 (2026-11-18 사용자 요청, 가짜 입력으로만 확인)**: `teleop/run.py` `--weight-gain` (기본 5, 0이면 끔)
+    - 신호: 그리퍼(팔 전체)가 큐브 몸통·패드에서 받는 접촉력 z (`teleop.force.contact_force_between`), 10Hz 저역통과. 블록 위에 있으면 블록이 받쳐 0, 들면 무게 + 관성
+    - b로 잡고 있는 동안만, 아래 방향(음수)만 x 배율 -> Minverse 아래로, 접촉 힘과 합친 뒤 --force-max(3.5N)로 자름. sim/na 둘 다 적용 (신호는 MuJoCo 정답)
+    - 가짜 입력: 블록 위 잡기 0N -> 들어 올리는 중 0.99N(가속) -> 들고 있는 동안 0.74N (= 0.147N x 5) -> b 놓으면 0
+    - 화면 표시 `load (true)`, `weight to haptic`, CSV 열 `load_z`, `fweight_z`
+    - **떨림 보정 (2026-11-18, 사용자 "들었을 때 덜덜", `teleop_cube_20261118_164311.csv`: 보낸 무게 평균 0.68 표준편차 0.31 최대 2.62N)**: 원인 = 큐브가 블록에 걸렸다 들렸다(끌림) + 손 떨림 가속도(손 목표 z 가속도 RMS 186 m/s2)가 관성으로 들어옴
+      - 수정: 큐브가 로봇 외(블록/바닥)에 닿아 있으면 0 (`cube_supported`), 필터 10 -> 2Hz, 변화 속도 3 N/s 제한 (WEIGHT_HZ, WEIGHT_SLEW)
+      - 가짜 입력 (손 노이즈 0.2mm + 4Hz ±4mm 흔들기): 보낸 무게 평균 0.72 표준편차 0.09 (0.57~0.88N)
+    - 큐브 무게 15g 그대로 (30g 결정 대기). 실물에서는 NeuralActuator가 원래 페이로드 무게(z)를 추정하도록 학습된 모델이라 이 신호의 실물 대응이 자연스러움
+  - **잡기 닫는 속도 (2026-11-18, 사용자 "너무 느림")**: 일부러 느렸음 (찌그러지는 1~2mm 동안 60Hz 샘플이 모여야 추정). `--grip-rate` 기본 0.1 -> **0.2 rad/s**
+    - 노이즈 0.5N, 시드 5 비교 (가장 깊은 패드 soft/medium/hard): 0.1 -> 2.65/1.82/1.29mm, 0.2 -> 2.86/2.11/1.50mm, 0.3 -> 3.02/2.74/2.15mm, 모두 들기 5/5
+  - **강성 3종 큐브 장면 (2026-11-18 사용자 요청)**: `models/so101_teleop3_scene.xml` = 1kHz 장면 + 넓은 받침 블록(x 8cm, y 18cm, 윗면 z 0.05) + 큐브 3개 `models/cubes_teleop3/` (cubes_teleop 복사본, 위치/회전만 다름)
+    - 로봇에서 앞을 볼 때 왼쪽(+y 0.05) soft, 가운데 medium, 오른쪽(-y 0.05) hard. 양옆 큐브는 z축으로 ±0.1974 rad(11.3°) 돌려 로봇 받침을 바라보게 (안 돌리면 턱이 비스듬히 닫혀 큐브를 밀어냄)
+      - 주의: Menagerie가 `compiler angle="radian"` -> 큐브 XML의 euler도 라디안 (처음에 도로 넣어 11.31 rad로 엉뚱하게 돌아감)
+    - `teleop/run.py --cubes 3`(기본) / `--cubes 1 --level x`(예전 한 개). 표시·기록·턱 힘·무게는 '그리퍼 끝에 가장 가까운 큐브'(잡는 동안 고정), 화면 `cube (nearest)`, CSV `cube_id`(0 soft 1 medium 2 hard), 버튼 c = 세 개 모두 되돌림
+    - 가짜 입력 (노이즈 0.3N, 각 큐브 옆 1.5mm에서 b -> 10cm 들기): 세 개 모두 들기 성공, 무게 0.74N
+  2) 강성 기반 그리퍼 제어: 버튼 b -> 닫다가 접촉 감지 -> 목표 그리퍼 위치 = 접촉 위치 - 목표 힘/추정 강성. 목표 힘은 강성 따라(딱딱 크게, 부드러움 작게) + 최대 찌그러짐 깊이 상한. 기존(끝까지 닫기)과 최대 변형량·들 때 미끄러짐 비교
+  3) 연동: 추정 강성을 로컬 접촉 모델(render/methods.ContactModel)과 공유하는 인터페이스, 화면에 추정 강성/목표 힘/현재 잡는 힘 표시
+  4) 실물 메모 (구현 안 함): 시뮬 = MuJoCo 접촉력 + 노이즈 / 실물 = 누를 때 NeuralActuator 외력(단, 페이로드 z만 학습), 잡을 때 그리퍼 서보 전류
+- [ ] **(4) Haply로 시뮬레이션 조작** (2026-10-27: 작업공간 매핑을 (2c)보다 먼저 진행하기로 함)
+  - Minverse로 MuJoCo 속 SO-101 조작 (위치 전용 IK, 작업공간 매핑), 힘 피드백
+  - Haply 연결은 우리 코드(`haply_force_test.handshake` 포함)로 직접 구현
+  - 결정 사항: **절대 위치 매핑**, 스타일러스 버튼을 **누르고 있을 때만** 로봇이 따라옴 (클러치는 나중에), 배율 2~3배 이내, 매핑은 설정 파일로 저장
+  - [x] ① Minverse 이동 범위 측정 (`haply_workspace_probe.py [초] [--auto]`, 읽기 전용, 2026-10-27 17:25)
+    - `--auto`: 엔터 없이 바로 기록 (사용자가 "시작"이라고 하면 실행). 첫 시도는 기록 중 스타일러스를 안 움직여서 범위 0 -> 재측정
+    - 축 방향 재확인: 오른쪽 +x, 앞 +y, 위 +z (이전 표와 같음)
+    - 범위(1~99%): x 26.0cm, y 16.7cm, z 27.4cm / 중심 (0.1273, -0.0822, 0.0276) m -> `config/haply_workspace.json`, 원시 데이터 `data/haply_workspace_*.csv`
+  - [x] ② SO-101 끝 도달 범위 (`so101_reach_map.py`, 시뮬레이션만)
+    - 그리퍼를 아래로 고정한 IK(`down` 옵션)는 범위가 8 x 24 x 4cm로 너무 좁음 (손목이 한계에 걸림)
+    - **위치 전용 IK `PosIK`** (so101_reach_map.py): 관절 4개로 끝 위치만 맞춤, 남는 자유도(null-space)로만 "아래 향하기 + 관절 범위 중앙" 선호, 한계에 닿은 관절은 그 방향 이동에서 제외
+      - 처음 버전은 손목이 한계에 붙어 높이 12cm 이상에서 실패 -> 위 방식으로 고친 뒤 도달 점 793 -> 3668 / 4400 (오차 0.02mm 이하)
+      - 도달 판정: IK 오차 < 1mm, 관절 한계에서 0.02rad 이상 (처음엔 상한 쪽 여유 계산에 실수가 있었음, 수정)
+  - [x] 매핑 설정 `config/teleop_mapping.json` (`make_teleop_mapping.py`가 생성)
+    - `robot = robot_center + scale * R @ (haply - haply_center)`, R: Minverse 앞(+y) -> 로봇 앞(+x), 오른쪽(+x) -> 로봇 오른쪽(-y), 위 -> 위
+    - 세 축 같은 배율 (모양/힘 방향 보존), 상자 안 격자점 전부 도달 가능 + 블록 윗점(0.25, 0, 0.06) 포함 조건으로 최대 배율 탐색
+    - 결과: **scale 0.65** (Minverse 1cm -> 로봇 0.65cm, 1.54배 축소), 로봇 상자 x 0.236~0.344, y -0.085~0.085, z 0.051~0.229 m, 중심 (0.29, 0, 0.14). 무작위 300점 IK 모두 도달
+    - haply_center는 측정 당시 값 -> 보정 후 원점이 바뀌면 다시 측정
+  - [ ] ③ 따라 움직이기 확인 (`so101_teleop_follow.py [a|b|c]`, **읽기 전용** - Minverse엔 probe_position만)
+    - 장면 `models/so101_teleop_scene.xml` (누르기 장면 + mocap 공 마커, 충돌 없음). 마커 = 매핑된 목표점 (따라가는 중 초록, 아니면 회색)
+    - 버튼(기본 a) 누르는 동안만 따라감, 놓으면 멈춤. 버튼 누른 순간 튀지 않게 목표점 이동 속도 0.3 m/s로 제한, 작업 상자 밖은 잘라냄
+    - 1차 사용자 확인: "괜찮은데 더 크게 스케일", 버튼으로 그리퍼 잡기, 스타일러스 각도 = 그리퍼 각도 요청
+  - [ ] ③-2 확장 (2026-10-27, 사용자 결정)
+    - **배율 1.3** (`teleop_mapping.json`의 `scale_user`, 자동 계산 `scale` 0.65는 기록으로 유지). 로봇 목표 범위 x 0.182~0.398, y ±0.169, z 0.04~0.24 m로 잘라냄. 닿지 못하는 곳은 IK가 가장 가까운 자세로 멈춤
+    - **버튼 a = 누르는 동안 따라가기, 버튼 b = 누르는 동안 그리퍼 닫기**(놓으면 열림)
+      - 그리퍼 관절: -0.175 = 닫힘(턱 사이 4mm), 0 = 16mm, 1.0 = 91mm, 1.745 = 133mm -> 열림 1.0, 닫힘 -0.17 사용
+    - **스타일러스 각도 반영**: SO-101은 팔 관절 5개라 위치 3 + 각도 2만 가능 -> 숙이기(pitch)는 손목 굽힘(IK 2차 목표 lift+elbow+wrist_flex), 비틀기(roll)는 wrist_roll, 돌리기(yaw)는 반영 안 함
+      - 버튼 a를 누른 순간의 스타일러스 자세와 로봇 손목 각도를 기준으로 상대 회전만 반영
+      - `PosIK.pitch_target`으로 손목 각도 목표를 바꿀 수 있게 함 (기본값은 아래 향하기 1.45)
+    - 스타일러스 자세 축 측정 `haply_orientation_probe.py` (읽기 전용, 엔터 진행) -> `config/stylus_orientation.json` (2026-10-27 17:35)
+      - **숙이기 = 스타일러스 +x축 회전(37.6°), 비틀기 = +y축(펜 축, 61.0°), 돌리기 = -z축(46.7°)**. 다른 축 성분은 7° 이하로 깔끔함
+      - 자세 값은 `wireless_verse_grip[0].state.orientation` {w,x,y,z} 쿼터니언
+    - 2026-10-27 실행해 둠 (사용자 확인 대기). 비틀기 방향(손목 회전 부호)이 반대로 느껴지면 부호만 바꾸면 됨
+    - 사용자 확인 2차: "되긴 하는데 상자를 못 잡음, 스타일러스 끝(숙이기)이 반대"
+      - 상자: 기존 블록은 고정(관절 없음) + 8cm라 못 잡음 -> 장면에 **잡을 수 있는 cube 추가** (한 변 3cm, 30g, 자유 관절, 블록 윗면 위 (0.25, 0, 0.066))
+        - 헤드리스 확인: 위에서 내려와 b(닫기) -> 그리퍼가 상자 폭에서 멈춤(q +0.17), 들어 올리면 cube z 0.065 -> 0.133 (성공)
+        - 자유 물체가 생기면 qpos가 6 -> 13으로 늘어남 -> 로봇 관절은 `qpos[:6]`만 쓰도록 IK/스크립트 수정
+      - 숙이기 방향: `teleop_mapping.json`에 `pitch_sign: -1` (부호 보정 설정, `roll_sign`도 있음). 화면 안내의 "숙이기=+x"는 측정 축이고 실제 적용 부호는 설정값을 곱한 것
+      - 숙이기를 약하게만 따라가던 문제: `PosIK` 2차 목표 비중을 텔레오퍼레이션에서 K_PITCH 1.0, K_MID 0.02로 (기본 0.3, 0.1이면 목표 0.6~1.8에 실제 0.70~1.07만 움직임)
+    - 스타일러스 버튼 이름 (`haply_button_probe.py`로 확인, 앞에서부터 눌렀다는 가정): **앞쪽 = c, 가운데 = b, 뒤쪽 = a**
+    - 사용자 확인 3차 / 변경 (2026-10-27)
+      - **배율 1.5** (`scale_user`), 로봇 목표 범위 x 0.165~0.40, y ±0.195, z 0.04~0.24 m
+      - **버튼 없이 항상 따라감**. 버튼 b = 누르는 동안 그리퍼 닫기, 버튼 a = 스타일러스 각도 기준을 지금 자세로 다시 잡기. 각도 기준은 시작 순간 자세
+      - 한 번 스크립트가 `IndexError`로 멈춤: 서비스 응답에 `inverse3`가 빈 리스트로 온 프레임이 있었음 (직후 장치 상태는 정상) -> 그런 프레임은 건너뛰고 직전 위치 유지, 1초 넘게 계속되면 경고 출력
+    - **스타일러스 방향 = 그리퍼 방향 (절대, 2026-10-27 사용자 요청)**: 스타일러스의 **볼 = 그리퍼 끝(손가락 끝)**, **뭉툭한 검은 끝 = 그리퍼 연결(손목) 쪽**
+      - `haply_stylus_axis_probe.py` (읽기 전용, 볼이 위/앞/오른쪽을 가리키는 세 자세) -> `config/stylus_axis.json` (2026-10-27 17:50)
+        - **볼 방향 = 스타일러스 로컬 +y축** (비틀기 축과 같은 펜 축), 자세 좌표계의 위 ≈ +z (0.02, 0.07, 0.997), 앞은 약 20° 돌아가 있음, 직교 오차 0.177 / 오른손 +0.994
+      - SO-101 관계 (시뮬레이션에서 오차 0으로 확인): 손목 회전축 방향이 팔 평면 안에서 이루는 각도 theta(팔이 뻗은 수평 = 0, 위 +) = -(shoulder_lift + elbow_flex + wrist_flex)
+        - 기준 수평 방향 hz = (shoulder_lift 축) x (위), q=0에서 +x가 되도록 부호 고정. 그리퍼 방향은 손목 회전축으로 정의 (손가락 끝-손목 원점 벡터는 wrist_roll에 따라 흔들려서 부적합)
+        - q=0 -> 수평 앞, wrist_flex +90° -> 아래, -90° -> 위
+      - 텔레오퍼레이션: 볼 방향을 (자세 좌표 -> 사용자 오른쪽/앞/위 -> 로봇 좌표)로 옮기고 팔 평면 각도 theta를 구해 `pitch_target = -theta`. 좌우(yaw)는 반영 못 함
+      - 비틀기는 상대값 유지, 버튼 a = 비틀기 기준 다시 잡기. 상대 숙이기 방식과 `pitch_sign`은 stylus_axis.json이 없을 때만 사용
+      - 실행 중 오류 한 번: 루프 안 변수 이름 `v`가 뷰어 객체 이름과 겹쳐 덮어씀 -> `ball_dir`로 수정
+      - **회전에는 배율을 적용하지 않음 (1:1)**. 배율 1.5는 위치에만
+    - 버튼 c (앞쪽) = 상자(cube)를 처음 자리(블록 위)로 되돌리기 (qpos0으로, 속도 0). 사용자가 상자를 떨어뜨려 추가. 동작 확인함
+    - 현재 버튼 정리: 로봇 항상 따라감 / a(뒤) = 비틀기 기준 다시 잡기 / b(가운데) = 누르는 동안 그리퍼 닫기 / c(앞) = 상자 되돌리기
+  - 주의: 장면 XML은 **절대 경로로** 불러야 함. 상대 경로로 열면 include가 여러 겹일 때 경로가 두 번 붙어서 실패 (MuJoCo 3.17.0)
+- [ ] **(5) 실물 데모**
+  - 선정된 렌더링 방법으로 실물 SO-101 + Minverse 데모 (정성적)
+
+### (보류) Isaac Sim 기준 이전 작업 순서와 설치 메모 (참고용)
+- [ ] (보류) **(1) Isaac Sim 설치 + SO-101 장면**
+  - Isaac Lab + Isaac Sim 설치 (이 PC, GUI 확인)
+    - 설치 단계: ① 긴 경로 지원 [완료] ② uv 설치 + 캐시 경로 [완료] ③ 클론 `git clone --branch release/3.0.0 https://github.com/isaac-sim/IsaacLab.git C:\isaac\IsaacLab` (문서대로) [완료]
+      ④ `uv sync --extra isaacsim` [2026-10-27 도중 취소, MuJoCo로 변경] ⑤ GUI 실행 확인. 단계마다 멈추고 사용자에게 결과 보고
+      - ③ 결과 (2026-10-27): 브랜치 release/3.0.0, 커밋 111751905 (`v3.0.0-3-g111751905`, 태그 v3.0.0 이후 자동 changelog 커밋 3개), 0.22GB, 변경 파일 0
+        - VS Code 재시작 후 `where uv` = `.local\bin\uv.exe`, `uv cache dir` = `C:\isaac\uv-cache` 반영 확인
+        - pyproject: Python `>=3.12,<3.13`, `isaacsim` extra = `isaacsim[all,extscache]==6.2.0.0`
+        - `teleop` extra는 XR 텔레오퍼레이션용(일부 Linux 전용)이라 지금은 설치하지 않음. Haply는 (4)단계에서 필요하면 확인
+  - SO-101 URDF -> USD 변환, 장면에 배치, GUI에서 로봇이 보이고 관절이 움직이는지 확인
+  - VRAM 부족 시 해상도/렌더 모드부터 낮춤
+- (보류) Isaac 기준 (2)~(5)는 위 MuJoCo 기준 순서로 대체됨. Isaac Lab을 다시 쓸 경우: ContactSensor 부착,
+  `HaplyDevice`는 그대로 쓰지 말고 핸드셰이크 추가 + 힘 필드 `"values"` -> `"vector"`로 수정
+
+#### (보류) Isaac (1) 준비 조사 메모 (2026-10-27)
+  - PC 사양: RTX 4070 **12GB VRAM**, 드라이버 610.88, i7-13700K (16코어/24스레드), RAM 31.3GB, C: 여유 134GB, Windows 11 Pro, git 2.51
+  - Isaac Lab 현재 문서 버전 3.0.0 (설치 문서: isaac-sim.github.io/IsaacLab/main/source/isaaclab/installation.html)
+    - Python 3.12, `uv` 기반 설치 (repo clone 후 `uv run`, 또는 `isaaclab==3.0.0` 휠 from pypi.nvidia.com). Windows 11 x86_64 지원 (긴 경로 지원 켜야 함)
+    - 기본 설치는 Isaac Sim 없이 Newton 물리. Isaac Sim은 선택 extra (`--extra isaacsim`, Isaac Sim 6.2/PhysX), **요구 사양 RAM 32GB, VRAM 16GB** -> 현재 GPU(12GB)는 미달이지만, 방침상 이 PC에서 진행하고 부족하면 렌더 설정을 낮춤
+    - Windows 드라이버 요구 595.97 이상 -> 610.88로 충족
+  - Haply 텔레오퍼레이션 가이드 ((4)단계 참고): 요구 OS Ubuntu 22.04/24.04만 명시, RTX 3090 이상 권장. 실행 `isaaclab example haply-teleoperation --websocket_uri ws://localhost:10001 --pos_sensitivity 1.65`, 힘 제한 기본 2.0N
+
+## 작업 규칙
+- 사용자와는 한국어로 대화
+- 실측 결과(키 이름, Hz, 좌표축)가 나오면 이 파일의 해당 항목을 갱신

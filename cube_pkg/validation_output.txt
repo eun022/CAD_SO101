@@ -1,0 +1,29 @@
+1. vertical press on the top pad (free cube on the table), probe mass 0.02 / 0.1 / 0.5 kg
+  soft   1.50 mm: pad 0.650, contact 0.650, FEM 0.650 N | 1.52 mm: pad 0.667, contact 0.667, FEM 0.667 N | 1.53 mm: pad 0.671, contact 0.671, FEM 0.671 N
+  medium 1.25 mm: pad 1.000, contact 1.000, FEM 1.000 N | 1.28 mm: pad 1.032, contact 1.032, FEM 1.032 N | 1.28 mm: pad 1.039, contact 1.039, FEM 1.039 N
+  hard   1.04 mm: pad 1.336, contact 1.336, FEM 1.336 N | 1.07 mm: pad 1.381, contact 1.381, FEM 1.381 N | 1.07 mm: pad 1.391, contact 1.391, FEM 1.391 N
+2. oblique press on the top pad (cube welded), probe travels 5.5 mm along a line tilted by theta
+   theta  normal depth  contact normal  FEM at that depth  tangential (friction)
+       0      1.50 mm       1.302 N         1.302 N       0.000 N
+      15      1.47 mm       1.269 N         1.269 N       0.000 N
+      30      1.37 mm       1.136 N         1.136 N       0.000 N
+      45      1.17 mm       0.902 N         0.902 N       0.000 N
+3. grip: jaw servo target 1 / 2 / 3 mm past first contact, cube held in the air
+   level   closure  pad -x   pad +x   contact -x  contact +x  FEM(closure)  slip in 0.9 s
+   soft     0.95 mm   0.134    0.134      0.134      0.134       0.134 N     0.077 mm   (lifted to 19.6 mm)
+   soft     1.88 mm   0.306    0.306      0.306      0.306       0.306 N     0.077 mm   (lifted to 19.7 mm)
+   soft     2.80 mm   0.490    0.490      0.490      0.490       0.490 N     0.076 mm   (lifted to 19.7 mm)
+   medium   0.90 mm   0.251    0.251      0.251      0.251       0.251 N     0.077 mm   (lifted to 19.6 mm)
+   medium   1.77 mm   0.572    0.572      0.572      0.572       0.572 N     0.076 mm   (lifted to 19.7 mm)
+   medium   2.63 mm   0.912    0.912      0.912      0.912       0.912 N     0.076 mm   (lifted to 19.7 mm)
+   hard     0.84 mm   0.401    0.401      0.401      0.401       0.401 N     0.077 mm   (lifted to 19.6 mm)
+   hard     1.64 mm   0.911    0.911      0.911      0.911       0.911 N     0.076 mm   (lifted to 19.7 mm)
+   hard     2.42 mm   1.448    1.448      1.448      1.448       1.448 N     0.075 mm   (lifted to 19.7 mm)
+4. grip on the table before lifting, medium, target 2 mm: effect of table friction
+   table friction 0.0: pad -x 0.570 N, pad +x 0.572 N, FEM 0.572 N
+   table friction 0.6: pad -x 0.570 N, pad +x 0.572 N, FEM 0.572 N
+5. timestep 2 ms, cube held in the air: pad solref 0.004 (default) and 0.01
+   soft   target 1 mm  solref 0.004: closure 0.95 mm, pads 0.134 / 0.134 N, FEM 0.134 N, height 19.6 mm  |  solref 0.01: closure 0.84 mm, pads 0.115 / 0.115 N, FEM 0.115 N, height 19.3 mm
+   medium target 2 mm  solref 0.004: closure 1.77 mm, pads 0.572 / 0.572 N, FEM 0.572 N, height 19.7 mm  |  solref 0.01: closure 1.42 mm, pads 0.441 / 0.441 N, FEM 0.441 N, height 19.4 mm
+   hard   target 2 mm  solref 0.004: closure 1.67 mm, pads 1.950 / 0.552 N, FEM 0.934 N, height -0.0 mm  |  solref 0.01: closure 1.21 mm, pads 0.637 / 0.637 N, FEM 0.637 N, height 19.4 mm
+   hard   target 3 mm  solref 0.004: closure 2.42 mm, pads 1.409 / 1.464 N, FEM 1.447 N, height -0.2 mm  |  solref 0.01: closure 1.85 mm, pads 1.055 / 1.055 N, FEM 1.055 N, height 19.5 mm

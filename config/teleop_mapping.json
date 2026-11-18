@@ -1,0 +1,65 @@
+{
+  "created_at": "2026-10-27 17:26:38",
+  "formula": "robot = robot_center + scale * R @ (haply - haply_center)",
+  "scale": 0.65,
+  "scale_user": 1.5,
+  "pitch_sign": -1,
+  "roll_sign": 1,
+  "sign_note": "스타일러스 숙이기/비틀기 방향 보정 (2026-10-27 사용자 체감: 숙이기 방향이 반대 -> pitch_sign -1)",
+  "scale_note": "scale은 상자 전체가 도달 가능한 최대 배율(자동 계산). scale_user는 사용자 지정(2026-10-27, 더 크게 움직이도록). so101_teleop_follow.py는 scale_user를 우선 사용하고, 도달 범위 밖은 IK가 가장 가까운 자세로 멈춤",
+  "R_haply_to_robot": [
+    [
+      0,
+      1,
+      0
+    ],
+    [
+      -1,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      1
+    ]
+  ],
+  "axis_map": {
+    "haply +y (앞)": "robot +x (앞)",
+    "haply +x (오른쪽)": "robot -y (오른쪽)",
+    "haply +z (위)": "robot +z (위)"
+  },
+  "haply_center_m": [
+    0.1273,
+    -0.0822,
+    0.0276
+  ],
+  "haply_half_range_m": [
+    0.1301,
+    0.0834,
+    0.137
+  ],
+  "robot_center_m": [
+    0.29,
+    0.0,
+    0.14
+  ],
+  "robot_box_min_m": [
+    0.2358,
+    -0.0846,
+    0.0509
+  ],
+  "robot_box_max_m": [
+    0.3442,
+    0.0846,
+    0.2291
+  ],
+  "must_include_m": [
+    0.25,
+    0.0,
+    0.06
+  ],
+  "ik_check": "300/300 random points reachable",
+  "source": "config/haply_workspace.json 2026-10-27 17:25:39",
+  "note": "haply_center는 측정 당시 값. 보정하면 원점이 바뀔 수 있으므로 세션 시작 시 다시 측정하거나 중심을 다시 잡을 것"
+}

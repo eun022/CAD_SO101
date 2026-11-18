@@ -1,0 +1,9 @@
+<!-- 우리 장면: Menagerie 원본(robotstudio_so101/scene.xml)을 수정 없이 include하고 timestep만 1ms(1kHz)로 덮어씀.
+     원본 so101.xml의 timestep은 0.005(200Hz).
+     원본 so101.xml의 compiler meshdir="assets"는 이 파일 위치 기준으로 풀려서 메시를 못 찾음 (MuJoCo 3.17.0에서 확인)
+     -> include 뒤에서 meshdir를 이 파일 기준 경로로 다시 지정 (include 앞에 두면 원본 값이 덮어써서 실패) -->
+<mujoco model="so101_scene_1khz">
+  <include file="mujoco_menagerie/robotstudio_so101/scene.xml"/>
+  <compiler meshdir="mujoco_menagerie/robotstudio_so101/assets"/>
+  <option timestep="0.001"/>
+</mujoco>

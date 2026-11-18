@@ -1,0 +1,16 @@
+<!-- 2026-11-18 강성 3종 큐브 장면: SO-101 1kHz + 넓은 받침 블록(y 18cm) + 큐브 3개 (로봇에서 앞을 볼 때 왼쪽 +y soft, 가운데 medium, 오른쪽 -y hard)
+     큐브 파일은 models/cubes_teleop3/ (cubes_teleop의 복사본, 위치만 다름). 블록 윗면 z = 0.05로 기존 장면과 같음 -->
+<mujoco model="so101_teleop3_scene">
+  <include file="so101_scene_1khz.xml"/>
+  <include file="cubes_teleop3/cube_soft.xml"/>
+  <include file="cubes_teleop3/cube_medium.xml"/>
+  <include file="cubes_teleop3/cube_hard.xml"/>
+  <worldbody>
+    <body name="block" pos="0.25 0 0.025">
+      <geom name="block" type="box" size="0.04 0.09 0.025" rgba="0.9 0.6 0.2 1"/>
+    </body>
+    <body name="target_marker" mocap="true" pos="0.29 0 0.14">
+      <geom name="target_marker" type="sphere" size="0.008" rgba="0.6 0.6 0.6 0.6" contype="0" conaffinity="0" group="1"/>
+    </body>
+  </worldbody>
+</mujoco>

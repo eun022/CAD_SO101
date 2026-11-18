@@ -1,0 +1,22 @@
+{
+  "measured_at": "2026-10-27 17:50:03",
+  "ball_axis_local": "+y",
+  "orthogonality_error": 0.177,
+  "handedness": 0.994,
+  "frame_up": [
+    0.0246,
+    0.0721,
+    0.9971
+  ],
+  "frame_forward": [
+    -0.3211,
+    0.9348,
+    -0.152
+  ],
+  "frame_right": [
+    0.932,
+    0.3625,
+    -0.0047
+  ],
+  "note": "볼 방향 = R(q) @ ball_axis_local (자세 기준 좌표). 사용자 기준 위/앞/오른쪽은 frame_* 벡터와 내적해서 구함"
+}

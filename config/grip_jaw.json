@@ -1,0 +1,9 @@
+{
+ "jaw_contact_point_local_m": [
+  -0.012023529007918806,
+  -0.07137508091121339,
+  0.020322861344089588
+ ],
+ "from": "data\\grasp\\grip_medium_slow.npz",
+ "note": "움직이는 턱(moving_jaw_so101_v1) 좌표에서 큐브 패드와 닿는 점 평균"
+}

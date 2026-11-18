@@ -1,0 +1,34 @@
+<mujoco model="cube_medium">
+  <worldbody>
+    <body name="cube_medium" pos="0 0 0">
+      <geom name="cube_medium_base" type="box" size="0.01100 0.01500 0.01300"
+            pos="0 0 0.01300" mass="0.0060" rgba="0.16 0.47 0.84 1" friction="0.6 0.005 0.0001"/>
+      <body name="cube_medium_pad_top" pos="0.00000 0.00000 0.02800">
+        <joint name="cube_medium_top" type="slide" axis="0 0 1" limited="true"
+               range="-0.00300 0" stiffness="1000.000" springref="0" damping="2"/>
+        <geom name="cube_medium_geom_top" type="box" size="0.01100 0.01500 0.00200"
+              mass="0.003" rgba="0.16 0.47 0.84 1" friction="1 0.005 0.0001" solref="0.004 1" solmix="100"/>
+      </body>
+      <body name="cube_medium_pad_xneg" pos="-0.01300 0.00000 0.01525">
+        <joint name="cube_medium_xneg" type="slide" axis="-1 0 0" limited="true"
+               range="-0.00300 0" stiffness="1340.494" springref="0" damping="2"/>
+        <geom name="cube_medium_geom_xneg" type="box" size="0.00200 0.01500 0.01475"
+              mass="0.003" rgba="0.16 0.47 0.84 1" friction="1 0.005 0.0001" solref="0.004 1" solmix="100"/>
+      </body>
+      <body name="cube_medium_pad_xpos" pos="0.01300 0.00000 0.01525">
+        <joint name="cube_medium_xpos" type="slide" axis="1 0 0" limited="true"
+               range="-0.00300 0" stiffness="481.407" springref="0" damping="2"/>
+        <geom name="cube_medium_geom_xpos" type="box" size="0.00200 0.01500 0.01475"
+              mass="0.003" rgba="0.16 0.47 0.84 1" friction="1 0.005 0.0001" solref="0.004 1" solmix="100"/>
+      </body>
+    </body>
+  </worldbody>
+  <contact>
+    <exclude body1="cube_medium" body2="cube_medium_pad_top"/>
+    <exclude body1="cube_medium" body2="cube_medium_pad_xneg"/>
+    <exclude body1="cube_medium" body2="cube_medium_pad_xpos"/>
+    <exclude body1="cube_medium_pad_top" body2="cube_medium_pad_xneg"/>
+    <exclude body1="cube_medium_pad_top" body2="cube_medium_pad_xpos"/>
+    <exclude body1="cube_medium_pad_xneg" body2="cube_medium_pad_xpos"/>
+  </contact>
+</mujoco>

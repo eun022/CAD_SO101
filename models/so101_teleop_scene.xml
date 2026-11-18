@@ -1,0 +1,17 @@
+<!-- (4)-③ 텔레오퍼레이션 장면: 누르기 장면(SO-101 + 고정 블록, 1kHz) + Minverse 목표 위치 공 마커 + FEM 큐브.
+     마커는 mocap 바디라 물리에 영향 없음 (충돌 꺼짐).
+     큐브 (2026-11-17): cube_pkg의 FEM 큐브 (한 변 3cm, 15g, 자유 관절, 윗면/-x면/+x면 패드).
+       make_cubes.py --pos 0.25 0 0.05 --out models/cubes_teleop 로 생성 -> 고정 블록(윗면 z=0.05) 위에 놓임
+       -x면 = 고정 턱, +x면 = 움직이는 턱 (SO-101이 정면(+x)을 향해 내려 잡을 때와 일치, 시뮬레이션 확인)
+       패드 힘은 cube_force.CubeForces.apply()가 매 스텝 넣어야 함 (안 넣으면 패드가 힘 없이 밀림)
+       so101_teleop_follow.py --level soft|hard 는 아래 include의 cube_medium을 바꿔서 불러옴
+     cone="elliptic" impratio="10"은 원본 Menagerie scene.xml에 이미 들어 있음 -->
+<mujoco model="so101_teleop_scene">
+  <include file="so101_press_scene.xml"/>
+  <include file="cubes_teleop/cube_medium.xml"/>
+  <worldbody>
+    <body name="target_marker" mocap="true" pos="0.29 0 0.14">
+      <geom name="target_marker" type="sphere" size="0.008" rgba="0.6 0.6 0.6 0.6" contype="0" conaffinity="0" group="1"/>
+    </body>
+  </worldbody>
+</mujoco>

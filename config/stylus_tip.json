@@ -1,0 +1,15 @@
+{
+  "measured_at": "2026-11-17 12:41:27",
+  "p_local_m": [
+    -0.00014,
+    0.00093,
+    0.00042
+  ],
+  "length_m": 0.00103,
+  "angle_to_ball_axis_deg": 25.3,
+  "rms_m": 1e-05,
+  "orientation_spread_deg": 0.8,
+  "samples": 2963,
+  "ok": false,
+  "note": "볼 끝(Minverse 좌표) = cursor + B @ R(q) @ p_local, B는 stylus_axis.json의 frame_* 로 만든 행렬"
+}
